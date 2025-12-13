@@ -12,68 +12,94 @@ namespace SharpSFV
 {
     public partial class Form1 : Form
     {
-        // ... (Existing fields) ...
+        #region Fields & Constants
+
         private AppSettings _settings;
         private ListViewColumnSorter _lvwColumnSorter;
 
+        // State Flags
         private bool _isProcessing = false;
         private HashType _currentHashType = HashType.XxHash3;
 
+        // UI Components
         private MenuStrip? _menuStrip;
-        private ContextMenuStrip? _ctxMenu; // NEW: Context Menu Field
-        private ToolStripMenuItem? _menuOptionsTime;
-        private ToolStripMenuItem? _menuOptionsAbsolutePaths;
-        private Dictionary<HashType, ToolStripMenuItem> _algoMenuItems = new Dictionary<HashType, ToolStripMenuItem>();
+        private ContextMenuStrip? _ctxMenu;
         private Panel? _statsPanel;
+        private Panel? _filterPanel;
+        private ProgressBar progressBarCurrent = new ProgressBar(); // Per-file progress
         private Label? _lblProgress;
         private Label? _lblStatsRow;
-        private ProgressBar progressBarCurrent = new ProgressBar();
 
+        // Menu Items References
+        private ToolStripMenuItem? _menuOptionsTime;
+        private ToolStripMenuItem? _menuOptionsAbsolutePaths;
+        private ToolStripMenuItem? _menuOptionsFilter;
+        private Dictionary<HashType, ToolStripMenuItem> _algoMenuItems = new Dictionary<HashType, ToolStripMenuItem>();
+
+        // Filtering & Data
+        private TextBox? _txtFilter;
+        private ComboBox? _cmbStatusFilter;
+        private List<ListViewItem> _allItems = new List<ListViewItem>(); // Master list used for filtering
+
+        // File extensions that trigger Verification mode instead of Creation mode
         private readonly HashSet<string> _verificationExtensions = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
         {
             ".xxh3", ".xxh", ".sum", ".md5", ".sfv", ".sha1", ".sha256", ".txt"
         };
 
+        // Safety limit to prevent crashes on legacy Windows APIs or specific tools
         private const int MaxWindowsPathLength = 256;
+
+        #endregion
+
+        #region Constructor & Initialization
 
         public Form1()
         {
             InitializeComponent();
 
+            // Initialize Settings using the Executable Path to ensure INI is found correctly
             _settings = new AppSettings(Application.ExecutablePath);
             _lvwColumnSorter = new ListViewColumnSorter();
 
             _settings.Load();
 
+            // Setup ListView Sorting
             this.lvFiles.ListViewItemSorter = _lvwColumnSorter;
             this.lvFiles.ColumnClick += LvFiles_ColumnClick;
             this.FormClosing += Form1_FormClosing;
 
+            // Initialize UI Layout
             SetupCustomMenu();
-            SetupContextMenu(); // NEW: Call setup for context menu
-            ApplySettings();
+            SetupContextMenu();
             SetupStatsPanel();
+            SetupFilterPanel();
             SetupDragDrop();
-            SetupLayout();
+
+            // Apply loaded settings (Window size, algorithm, etc.)
+            ApplySettings();
+            SetupLayout(); // Finalize layout dockings
 
             this.Text = "SharpSFV";
         }
 
-        // ... (Form1_Load, ApplySettings, Form1_FormClosing, SetupLayout, SetupStatsPanel, SetupCustomMenu, AddAlgoMenuItem, SetAlgorithm, SetupDragDrop, LvFiles_ColumnClick, UpdateStats, Form1_DragDrop, HandleDroppedPaths, FindCommonBasePath, RunHashCreation, RunVerification unchanged) ...
-
-        // PASTE THE EXISTING METHODS HERE (omitted for brevity, assume previous code exists)
-        // Ensure you keep all previous logic for RunHashCreation, RunVerification, etc.
-
-        // ... [Insert previous methods here] ...
-
         private async void Form1_Load(object? sender, EventArgs e)
         {
+            // Handle Command Line Arguments (e.g. "Open With" from Explorer)
             string[] args = Environment.GetCommandLineArgs();
             if (args.Length > 1) await HandleDroppedPaths(args.Skip(1).ToArray());
         }
 
+        #endregion
+
+        #region Settings Management
+
+        /// <summary>
+        /// Applies the configuration loaded from AppSettings to the UI controls.
+        /// </summary>
         private void ApplySettings()
         {
+            // Restore Window Size/Pos
             if (_settings.WindowSize.Width > 100) this.Size = _settings.WindowSize;
 
             if (_settings.HasCustomLocation)
@@ -81,15 +107,18 @@ namespace SharpSFV
                 this.StartPosition = FormStartPosition.Manual;
                 this.Location = _settings.WindowLocation;
 
+                // Ensure window is actually visible on current screens
                 bool isOnScreen = Screen.AllScreens.Any(s => s.WorkingArea.IntersectsWith(this.Bounds));
                 if (!isOnScreen) this.StartPosition = FormStartPosition.CenterScreen;
             }
 
-            if (_menuOptionsTime != null)
-                _menuOptionsTime.Checked = _settings.ShowTimeTab;
+            // Sync Menu Checkboxes
+            if (_menuOptionsTime != null) _menuOptionsTime.Checked = _settings.ShowTimeTab;
+            if (_menuOptionsAbsolutePaths != null) _menuOptionsAbsolutePaths.Checked = _settings.UseAbsolutePaths;
+            if (_menuOptionsFilter != null) _menuOptionsFilter.Checked = _settings.ShowFilterPanel;
 
-            if (_menuOptionsAbsolutePaths != null)
-                _menuOptionsAbsolutePaths.Checked = _settings.UseAbsolutePaths;
+            // Set Visibility
+            if (_filterPanel != null) _filterPanel.Visible = _settings.ShowFilterPanel;
 
             ToggleTimeColumn();
             SetAlgorithm(_settings.DefaultAlgo);
@@ -97,35 +126,47 @@ namespace SharpSFV
 
         private void Form1_FormClosing(object? sender, FormClosingEventArgs e)
         {
+            // Sync settings back to object before saving to disk
             bool timeEnabled = _menuOptionsTime?.Checked ?? false;
             _settings.UseAbsolutePaths = _menuOptionsAbsolutePaths?.Checked ?? false;
+            _settings.ShowFilterPanel = _menuOptionsFilter?.Checked ?? false;
+
             _settings.Save(this, timeEnabled, _currentHashType);
         }
 
+        #endregion
+
+        #region UI Layout Setup
+
+        /// <summary>
+        /// Arranges the panels, progress bars, and listview in the form.
+        /// Called during init and updates.
+        /// </summary>
         private void SetupLayout()
         {
             this.Controls.Clear();
-            Panel progressPanel = new Panel { Height = 40, Dock = DockStyle.Bottom };
 
+            // Bottom Panel: Contains Dual Progress Bars
+            Panel progressPanel = new Panel { Height = 40, Dock = DockStyle.Bottom };
             progressBarTotal.Dock = DockStyle.Bottom;
             progressBarTotal.Height = 20;
-
             progressBarCurrent.Dock = DockStyle.Top;
             progressBarCurrent.Height = 20;
             progressBarCurrent.Minimum = 0;
             progressBarCurrent.Maximum = 100;
-
             progressPanel.Controls.Add(progressBarCurrent);
             progressPanel.Controls.Add(progressBarTotal);
-
             this.Controls.Add(progressPanel);
+
+            // Center: File List
             lvFiles.Dock = DockStyle.Fill;
             this.Controls.Add(lvFiles);
-            if (_statsPanel != null) this.Controls.Add(_statsPanel);
-            if (_menuStrip != null) this.Controls.Add(_menuStrip);
-        }
 
-        // ... (Keep SetupStatsPanel, SetupCustomMenu, etc. exactly as they were in previous steps)
+            // Top Panels (Added in reverse order of DockStyle.Top visual appearance)
+            if (_filterPanel != null) this.Controls.Add(_filterPanel); // Bottom-most top panel
+            if (_statsPanel != null) this.Controls.Add(_statsPanel);   // Middle top panel
+            if (_menuStrip != null) this.Controls.Add(_menuStrip);     // Very top
+        }
 
         private void SetupStatsPanel()
         {
@@ -136,23 +177,56 @@ namespace SharpSFV
             _statsPanel.Controls.Add(_lblStatsRow);
         }
 
+        private void SetupFilterPanel()
+        {
+            _filterPanel = new Panel
+            {
+                Height = 35,
+                Dock = DockStyle.Top,
+                BackColor = SystemColors.Control,
+                Padding = new Padding(5),
+                Visible = false // Hidden by default unless enabled in settings
+            };
+
+            Label lblSearch = new Label { Text = "Search:", AutoSize = true, Location = new Point(10, 8) };
+            _txtFilter = new TextBox { Width = 200, Location = new Point(60, 5) };
+            _txtFilter.TextChanged += (s, e) => ApplyFilter();
+
+            Label lblStatus = new Label { Text = "Status:", AutoSize = true, Location = new Point(280, 8) };
+            _cmbStatusFilter = new ComboBox { Width = 100, Location = new Point(330, 5), DropDownStyle = ComboBoxStyle.DropDownList };
+            _cmbStatusFilter.Items.AddRange(new object[] { "All", "Pending", "OK", "BAD", "MISSING", "Waiting..." });
+            _cmbStatusFilter.SelectedIndex = 0;
+            _cmbStatusFilter.SelectedIndexChanged += (s, e) => ApplyFilter();
+
+            _filterPanel.Controls.AddRange(new Control[] { lblSearch, _txtFilter, lblStatus, _cmbStatusFilter });
+        }
+
         private void SetupCustomMenu()
         {
             _menuStrip = new MenuStrip { Dock = DockStyle.Top };
 
+            // File Menu
             var menuFile = new ToolStripMenuItem("File");
             menuFile.DropDownItems.Add(new ToolStripMenuItem("Open...", null, (s, e) => PerformOpenAction()) { ShortcutKeys = Keys.Control | Keys.O });
             menuFile.DropDownItems.Add(new ToolStripMenuItem("Save As...", null, (s, e) => PerformSaveAction()) { ShortcutKeys = Keys.Control | Keys.S });
             menuFile.DropDownItems.Add(new ToolStripSeparator());
             menuFile.DropDownItems.Add(new ToolStripMenuItem("Exit", null, (s, e) => Application.Exit()) { ShortcutKeys = Keys.Alt | Keys.F4 });
 
+            // Edit Menu (Clipboard)
+            var menuEdit = new ToolStripMenuItem("Edit");
+            menuEdit.DropDownItems.Add(new ToolStripMenuItem("Copy Details", null, (s, e) => PerformCopyAction()) { ShortcutKeys = Keys.Control | Keys.C });
+            menuEdit.DropDownItems.Add(new ToolStripMenuItem("Paste Paths", null, (s, e) => PerformPasteAction()) { ShortcutKeys = Keys.Control | Keys.V });
+            menuEdit.DropDownItems.Add(new ToolStripSeparator());
+            menuEdit.DropDownItems.Add(new ToolStripMenuItem("Select All", null, (s, e) => PerformSelectAllAction()) { ShortcutKeys = Keys.Control | Keys.A });
+
+            // Options Menu
             var menuOptions = new ToolStripMenuItem("Options");
             _menuOptionsTime = new ToolStripMenuItem("Enable Time Elapsed Tab", null, (s, e) => ToggleTimeColumn()) { CheckOnClick = true };
-
             _menuOptionsAbsolutePaths = new ToolStripMenuItem("Always Save Absolute Paths", null, (s, e) => {
                 _settings.UseAbsolutePaths = !_settings.UseAbsolutePaths;
             })
             { CheckOnClick = true };
+            _menuOptionsFilter = new ToolStripMenuItem("Show Search/Filter Bar", null, (s, e) => ToggleFilterPanel()) { CheckOnClick = true };
 
             var menuAlgo = new ToolStripMenuItem("Default Hashing Algorithm");
             AddAlgoMenuItem(menuAlgo, "xxHash-3 (128-bit)", HashType.XxHash3);
@@ -164,32 +238,19 @@ namespace SharpSFV
             menuOptions.DropDownItems.AddRange(new ToolStripItem[] {
                 _menuOptionsTime,
                 _menuOptionsAbsolutePaths,
+                _menuOptionsFilter,
                 menuAlgo,
                 new ToolStripSeparator(),
                 new ToolStripMenuItem("Generate 'Delete BAD Files' Script", null, (s, e) => PerformBatchExport())
             });
 
+            // Help Menu
             var menuHelp = new ToolStripMenuItem("Help");
             menuHelp.DropDownItems.Add(new ToolStripMenuItem("Credits", null, (s, e) => ShowCredits()));
 
-            _menuStrip.Items.AddRange(new ToolStripItem[] { menuFile, menuOptions, menuHelp });
+            _menuStrip.Items.AddRange(new ToolStripItem[] { menuFile, menuEdit, menuOptions, menuHelp });
         }
 
-        private void AddAlgoMenuItem(ToolStripMenuItem parent, string text, HashType type)
-        {
-            var item = new ToolStripMenuItem(text, null, (s, e) => SetAlgorithm(type));
-            parent.DropDownItems.Add(item);
-            _algoMenuItems[type] = item;
-        }
-
-        private void SetAlgorithm(HashType type)
-        {
-            _currentHashType = type;
-            foreach (var kvp in _algoMenuItems) kvp.Value.Checked = (kvp.Key == type);
-            if (!_isProcessing) this.Text = $"SharpSFV - Create [{_currentHashType}]";
-        }
-
-        // NEW: Context Menu Setup and Handlers
         private void SetupContextMenu()
         {
             _ctxMenu = new ContextMenuStrip();
@@ -198,40 +259,30 @@ namespace SharpSFV
             var itemCopyPath = new ToolStripMenuItem("Copy Full Path", null, CtxCopyPath_Click);
             var itemCopyHash = new ToolStripMenuItem("Copy Hash", null, CtxCopyHash_Click);
             var itemRename = new ToolStripMenuItem("Rename File...", null, CtxRename_Click);
-            var itemDelete = new ToolStripMenuItem("Delete File", null, CtxDelete_Click); // Physical Delete
-            var itemRemove = new ToolStripMenuItem("Remove from List", null, CtxRemoveList_Click); // List remove
+            var itemDelete = new ToolStripMenuItem("Delete File", null, CtxDelete_Click);
+            var itemRemove = new ToolStripMenuItem("Remove from List", null, CtxRemoveList_Click);
 
             _ctxMenu.Items.AddRange(new ToolStripItem[] {
-                itemOpen,
-                new ToolStripSeparator(),
-                itemCopyPath,
-                itemCopyHash,
-                new ToolStripSeparator(),
-                itemRename,
-                itemDelete,
-                itemRemove
+                itemOpen, new ToolStripSeparator(),
+                itemCopyPath, itemCopyHash, new ToolStripSeparator(),
+                itemRename, itemDelete, itemRemove
             });
 
+            // Dynamically enable/disable context options based on selection
             _ctxMenu.Opening += (s, e) =>
             {
-                if (lvFiles.SelectedItems.Count == 0)
-                {
-                    e.Cancel = true;
-                    return;
-                }
+                if (lvFiles.SelectedItems.Count == 0) { e.Cancel = true; return; }
 
-                // Enable/Disable logic based on selection count or file status
                 bool singleSel = lvFiles.SelectedItems.Count == 1;
                 bool fileExists = false;
-
                 if (singleSel && lvFiles.SelectedItems[0].Tag is FileItemData data)
                 {
                     fileExists = File.Exists(data.FullPath);
                 }
 
                 itemOpen.Enabled = singleSel;
-                itemRename.Enabled = singleSel && fileExists; // Can't rename if missing
-                itemDelete.Enabled = singleSel && fileExists; // Can't physically delete if missing
+                itemRename.Enabled = singleSel && fileExists;
+                itemDelete.Enabled = singleSel && fileExists;
                 itemCopyPath.Enabled = singleSel;
                 itemCopyHash.Enabled = singleSel;
             };
@@ -239,166 +290,56 @@ namespace SharpSFV
             lvFiles.ContextMenuStrip = _ctxMenu;
         }
 
-        private void CtxOpenFolder_Click(object? sender, EventArgs e)
+        private void SetupUIForMode(string mode)
         {
-            if (lvFiles.SelectedItems.Count != 1) return;
-            if (lvFiles.SelectedItems[0].Tag is FileItemData data)
-            {
-                try
-                {
-                    if (File.Exists(data.FullPath))
-                    {
-                        // Select the file in explorer
-                        Process.Start("explorer.exe", $"/select,\"{data.FullPath}\"");
-                    }
-                    else if (Directory.Exists(Path.GetDirectoryName(data.FullPath)))
-                    {
-                        // If file missing, just open the folder
-                        Process.Start("explorer.exe", Path.GetDirectoryName(data.FullPath)!);
-                    }
-                }
-                catch (Exception ex) { MessageBox.Show("Error opening folder: " + ex.Message); }
-            }
+            lvFiles.BeginUpdate();
+            lvFiles.Items.Clear();
+            lvFiles.Columns.Clear();
+
+            // Reset Sorting
+            _lvwColumnSorter.SortColumn = -1;
+            _lvwColumnSorter.Order = SortOrder.None;
+
+            lvFiles.Columns.Add("File Name", 300);
+            lvFiles.Columns.Add("Hash", 220);
+            lvFiles.Columns.Add("Status", 100);
+
+            if (mode == "Verification") lvFiles.Columns.Add("Expected Hash", 220);
+            if (_menuOptionsTime != null && _menuOptionsTime.Checked) lvFiles.Columns.Add("Time", 80);
+
+            lvFiles.EndUpdate();
+            this.Text = (mode == "Verification") ? "SharpSFV - Verify" : $"SharpSFV - Create [{_currentHashType}]";
         }
 
-        private void CtxCopyPath_Click(object? sender, EventArgs e)
-        {
-            if (lvFiles.SelectedItems.Count > 0 && lvFiles.SelectedItems[0].Tag is FileItemData data)
-                Clipboard.SetText(data.FullPath);
-        }
+        #endregion
 
-        private void CtxCopyHash_Click(object? sender, EventArgs e)
-        {
-            if (lvFiles.SelectedItems.Count > 0)
-            {
-                // Hash is in SubItem 1
-                string hash = lvFiles.SelectedItems[0].SubItems[1].Text;
-                if (!string.IsNullOrEmpty(hash) && !hash.Contains("..."))
-                    Clipboard.SetText(hash);
-            }
-        }
+        #region Core Logic (Path Handling, Hashing, Verification)
 
-        private void CtxDelete_Click(object? sender, EventArgs e)
-        {
-            if (lvFiles.SelectedItems.Count != 1) return;
-            var item = lvFiles.SelectedItems[0];
-            if (item.Tag is FileItemData data)
-            {
-                if (MessageBox.Show($"Are you sure you want to permanently delete:\n{data.FullPath}?", "Confirm Delete", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) == DialogResult.Yes)
-                {
-                    try
-                    {
-                        File.Delete(data.FullPath);
-                        lvFiles.Items.Remove(item);
-                    }
-                    catch (Exception ex) { MessageBox.Show("Error deleting file: " + ex.Message); }
-                }
-            }
-        }
-
-        private void CtxRemoveList_Click(object? sender, EventArgs e)
-        {
-            foreach (ListViewItem item in lvFiles.SelectedItems)
-            {
-                lvFiles.Items.Remove(item);
-            }
-        }
-
-        private void CtxRename_Click(object? sender, EventArgs e)
-        {
-            if (lvFiles.SelectedItems.Count != 1) return;
-            var item = lvFiles.SelectedItems[0];
-            if (item.Tag is FileItemData data)
-            {
-                string dir = Path.GetDirectoryName(data.FullPath) ?? "";
-                string oldName = Path.GetFileName(data.FullPath);
-
-                string newName = SimpleInputDialog.ShowDialog("Rename File", "Enter new filename:", oldName);
-                if (!string.IsNullOrWhiteSpace(newName) && newName != oldName)
-                {
-                    string newPath = Path.Combine(dir, newName);
-                    try
-                    {
-                        File.Move(data.FullPath, newPath);
-
-                        // Update Data
-                        data.FullPath = newPath;
-                        if (!string.IsNullOrEmpty(data.RelativePath))
-                            data.RelativePath = Path.Combine(Path.GetDirectoryName(data.RelativePath) ?? "", newName);
-
-                        // Update UI
-                        item.Text = newName;
-                    }
-                    catch (Exception ex) { MessageBox.Show("Error renaming file: " + ex.Message); }
-                }
-            }
-        }
-
-        // ... (Keep existing methods: SetupDragDrop, LvFiles_ColumnClick, UpdateStats, Form1_DragDrop, HandleDroppedPaths, FindCommonBasePath, RunHashCreation, RunVerification, PerformBatchExport, PerformOpenAction, PerformSaveAction, ToggleTimeColumn, ShowCredits) ...
-        // INCLUDE ALL PREVIOUS LOGIC HERE FOR THOSE METHODS
-
-        private void SetupDragDrop()
-        {
-            this.AllowDrop = true;
-            this.DragEnter += (s, e) => { if (e.Data!.GetDataPresent(DataFormats.FileDrop)) e.Effect = DragDropEffects.Copy; };
-            this.DragDrop += Form1_DragDrop;
-        }
-
-        private void LvFiles_ColumnClick(object? sender, ColumnClickEventArgs e)
-        {
-            if (_isProcessing) return;
-            if (e.Column != _lvwColumnSorter.SortColumn)
-            {
-                _lvwColumnSorter.SortColumn = e.Column;
-                _lvwColumnSorter.Order = SortOrder.Ascending;
-            }
-            else
-            {
-                if (_lvwColumnSorter.Order == SortOrder.None) _lvwColumnSorter.Order = SortOrder.Ascending;
-                else if (_lvwColumnSorter.Order == SortOrder.Ascending) _lvwColumnSorter.Order = SortOrder.Descending;
-                else _lvwColumnSorter.Order = SortOrder.None;
-            }
-            this.lvFiles.Sort();
-        }
-
-        private void UpdateStats(int current, int total, int ok, int bad, int missing)
-        {
-            if (_lblProgress != null) _lblProgress.Text = $"Completed files: {current} / {total}";
-            if (_lblStatsRow != null)
-            {
-                _lblStatsRow.Text = $"OK: {ok}     BAD: {bad}     MISSING: {missing}";
-                if (bad > 0 || missing > 0) _lblStatsRow.ForeColor = Color.Red;
-                else if (ok > 0) _lblStatsRow.ForeColor = Color.DarkGreen;
-                else _lblStatsRow.ForeColor = Color.Black;
-            }
-        }
-
-        private async void Form1_DragDrop(object? sender, DragEventArgs e)
-        {
-            if (_isProcessing) return;
-            string[]? paths = (string[]?)e.Data!.GetData(DataFormats.FileDrop);
-            if (paths != null && paths.Length > 0)
-            {
-                await HandleDroppedPaths(paths);
-            }
-        }
-
+        /// <summary>
+        /// Analyzes dropped paths to determine if we should verify a file or create new hashes.
+        /// Handles recursive folder scanning.
+        /// </summary>
         private async Task HandleDroppedPaths(string[] paths)
         {
             if (paths.Length == 0) return;
 
             bool containsFolder = paths.Any(p => Directory.Exists(p));
 
+            // Reset backend sorting and visual indicators
             _lvwColumnSorter.SortColumn = -1;
             _lvwColumnSorter.Order = SortOrder.None;
             this.lvFiles.ListViewItemSorter = null;
+            UpdateSortVisuals(-1, SortOrder.None);
 
+            // CASE 1: Verification (Single file dropped with known extension, e.g., .sfv, .md5)
             if (!containsFolder && paths.Length == 1 && _verificationExtensions.Contains(Path.GetExtension(paths[0])) && File.Exists(paths[0]))
             {
                 await RunVerification(paths[0]);
             }
+            // CASE 2: Creation (Files or Folders dropped)
             else
             {
+                // Determine Base Directory logic for relative paths
                 string baseDirectory = "";
                 if (paths.Length > 0)
                 {
@@ -415,6 +356,7 @@ namespace SharpSFV
                     }
                 }
 
+                // Gather all files recursively
                 List<string> allFilesToHash = new List<string>();
                 foreach (string path in paths)
                 {
@@ -431,71 +373,44 @@ namespace SharpSFV
             this.lvFiles.ListViewItemSorter = _lvwColumnSorter;
         }
 
-        private string FindCommonBasePath(List<string> paths)
-        {
-            if (paths == null || paths.Count == 0) return "";
-            if (paths.Count == 1) return paths[0];
-
-            string[] shortestPathParts = paths.OrderBy(p => p.Length).First().Split(Path.DirectorySeparatorChar, StringSplitOptions.RemoveEmptyEntries);
-            string commonPath = "";
-
-            for (int i = 0; i < shortestPathParts.Length; i++)
-            {
-                string currentSegment = shortestPathParts[i];
-                bool allMatch = true;
-                foreach (string path in paths)
-                {
-                    string[] otherPathParts = path.Split(Path.DirectorySeparatorChar, StringSplitOptions.RemoveEmptyEntries);
-                    if (i >= otherPathParts.Length || !otherPathParts[i].Equals(currentSegment, StringComparison.OrdinalIgnoreCase))
-                    {
-                        allMatch = false;
-                        break;
-                    }
-                }
-                if (allMatch) commonPath = Path.Combine(commonPath, currentSegment);
-                else break;
-            }
-            if (commonPath.Length > 0 && commonPath.IndexOf(':') == 1 && Path.IsPathRooted(paths[0]))
-            {
-                return paths[0].Substring(0, 3) + commonPath.Substring(3);
-            }
-            return commonPath;
-        }
-
         private async Task RunHashCreation(string[] filePaths, string baseDirectory)
         {
             _isProcessing = true;
             SetupUIForMode("Creation");
             UpdateStats(0, filePaths.Length, 0, 0, 0);
 
+            _allItems.Clear(); // Clear Master List used for filtering
             List<ListViewItem> items = new List<ListViewItem>();
             int originalIndex = 0;
             int skippedCount = 0;
 
+            // Pre-process files into ListViewItems
             foreach (var fullPath in filePaths)
             {
                 if (Directory.Exists(fullPath)) continue;
 
                 if (fullPath.Length > MaxWindowsPathLength)
                 {
-                    MessageBox.Show($"Skipping file due to excessively long path (>{MaxWindowsPathLength} chars): {fullPath}", "Path Too Long", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    MessageBox.Show($"Skipping file due to excessively long path: {fullPath}", "Path Too Long", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                     skippedCount++;
                     continue;
                 }
 
                 string fileName = Path.GetFileName(fullPath);
+                // Validate filename/path characters
                 if (fileName.Any(c => Path.GetInvalidFileNameChars().Contains(c)) || fullPath.Any(c => Path.GetInvalidPathChars().Contains(c)))
                 {
-                    MessageBox.Show($"Skipping file due to invalid characters in filename: {fileName}", "Invalid Characters", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    MessageBox.Show($"Skipping file due to invalid characters: {fileName}", "Invalid Characters", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                     skippedCount++;
                     continue;
                 }
 
+                // Calculate relative path
                 string relativePath = "";
                 if (!string.IsNullOrEmpty(baseDirectory))
                 {
                     try { relativePath = Path.GetRelativePath(baseDirectory, fullPath); }
-                    catch { relativePath = fullPath; }
+                    catch { relativePath = fullPath; } // Fallback
                 }
                 else relativePath = Path.GetFileName(fullPath);
 
@@ -509,6 +424,7 @@ namespace SharpSFV
                     Index = originalIndex++
                 };
                 items.Add(item);
+                _allItems.Add(item); // Add to Master
                 lvFiles.Items.Add(item);
             }
 
@@ -517,7 +433,7 @@ namespace SharpSFV
                 _isProcessing = false;
                 UpdateStats(0, 0, 0, 0, 0);
                 this.Text = $"SharpSFV - Create [{_currentHashType}]";
-                if (skippedCount > 0) MessageBox.Show("No valid files added due to path errors.", "Info", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                if (skippedCount > 0) MessageBox.Show("No valid files added.", "Info", MessageBoxButtons.OK, MessageBoxIcon.Information);
                 return;
             }
 
@@ -531,27 +447,30 @@ namespace SharpSFV
             int okCount = 0;
             int errorCount = 0;
 
-            var progress = new Progress<double>(percent =>
-            {
+            // Per-file progress reporter
+            var progress = new Progress<double>(percent => {
                 int val = (int)percent;
-                if (val != progressBarCurrent.Value)
-                    progressBarCurrent.Value = Math.Min(100, Math.Max(0, val));
+                if (val != progressBarCurrent.Value) progressBarCurrent.Value = Math.Min(100, Math.Max(0, val));
             });
 
+            // --- MAIN PROCESSING LOOP ---
             foreach (var item in items)
             {
-                item.EnsureVisible();
+                // Scroll list to item
+                if (lvFiles.Items.Contains(item)) item.EnsureVisible();
+
                 if (item.Tag is FileItemData data)
                 {
                     progressBarCurrent.Value = 0;
                     sw.Restart();
-
+                    // Compute Hash
                     string hash = await HashHelper.ComputeHashAsync(data.FullPath, _currentHashType, progress);
                     sw.Stop();
 
                     item.SubItems[1].Text = hash;
                     if (showTime) item.SubItems[3].Text = $"{sw.ElapsedMilliseconds} ms";
 
+                    // Handle Results
                     if (hash == "FILE_NOT_FOUND" || hash == "ACCESS_DENIED" || hash == "ERROR")
                     {
                         item.SubItems[2].Text = hash;
@@ -585,6 +504,7 @@ namespace SharpSFV
             string baseFolder = Path.GetDirectoryName(checkFilePath) ?? "";
             string ext = Path.GetExtension(checkFilePath).ToLowerInvariant();
 
+            // Auto-detect algorithm based on extension
             HashType verificationAlgo = _currentHashType;
             if (ext == ".sfv") verificationAlgo = HashType.Crc32;
             else if (ext == ".md5") verificationAlgo = HashType.MD5;
@@ -592,6 +512,7 @@ namespace SharpSFV
             else if (ext == ".sha256") verificationAlgo = HashType.SHA256;
             else if (ext == ".xxh3") verificationAlgo = HashType.XxHash3;
 
+            // Parse the hash file
             var parsedLines = new List<(string ExpectedHash, string Filename)>();
             try
             {
@@ -599,9 +520,9 @@ namespace SharpSFV
                 {
                     if (string.IsNullOrWhiteSpace(line) || line.StartsWith(";")) continue;
 
+                    // Regex to parse "Hash *Filename" or "Hash Filename"
                     string pattern = @"^([0-9a-fA-F]+)\s+\*?(.*)$";
                     Match match = Regex.Match(line, pattern);
-
                     if (match.Success)
                     {
                         string expectedHash = match.Groups[1].Value;
@@ -611,17 +532,18 @@ namespace SharpSFV
                     }
                 }
             }
-            catch (Exception ex) { MessageBox.Show("Error parsing hash file: " + ex.Message); _isProcessing = false; return; }
+            catch (Exception ex) { MessageBox.Show("Error parsing: " + ex.Message); _isProcessing = false; return; }
 
+            _allItems.Clear();
             List<ListViewItem> items = new List<ListViewItem>();
             int originalIndex = 0;
             int okCount = 0, badCount = 0, missingCount = 0;
 
+            // Populate list
             foreach (var entry in parsedLines)
             {
                 string fullPath = Path.GetFullPath(Path.Combine(baseFolder, entry.Filename));
                 bool exists = File.Exists(fullPath);
-
                 if (fullPath.Length > MaxWindowsPathLength) exists = false;
 
                 var item = new ListViewItem(entry.Filename);
@@ -646,6 +568,7 @@ namespace SharpSFV
                     Index = originalIndex++
                 };
                 items.Add(item);
+                _allItems.Add(item);
                 lvFiles.Items.Add(item);
             }
 
@@ -659,16 +582,16 @@ namespace SharpSFV
             bool showTime = _menuOptionsTime?.Checked ?? false;
             int completed = 0;
 
-            var progress = new Progress<double>(percent =>
-            {
+            var progress = new Progress<double>(percent => {
                 int val = (int)percent;
-                if (val != progressBarCurrent.Value)
-                    progressBarCurrent.Value = Math.Min(100, Math.Max(0, val));
+                if (val != progressBarCurrent.Value) progressBarCurrent.Value = Math.Min(100, Math.Max(0, val));
             });
 
+            // --- MAIN VERIFICATION LOOP ---
             foreach (var item in items)
             {
-                item.EnsureVisible();
+                if (lvFiles.Items.Contains(item)) item.EnsureVisible();
+
                 if (item.Tag is FileItemData data)
                 {
                     if (item.SubItems[2].Text == "MISSING")
@@ -687,6 +610,7 @@ namespace SharpSFV
                     item.SubItems[1].Text = calculatedHash;
                     if (showTime) item.SubItems[4].Text = $"{sw.ElapsedMilliseconds} ms";
 
+                    // Comparison Logic
                     if (calculatedHash == "FILE_NOT_FOUND" || calculatedHash == "ACCESS_DENIED" || calculatedHash == "ERROR")
                     {
                         item.SubItems[2].Text = calculatedHash;
@@ -722,26 +646,56 @@ namespace SharpSFV
                 : $"SharpSFV [{algoName}] - {badCount} Bad, {missingCount} Missing";
         }
 
-        private void SetupUIForMode(string mode)
+        #endregion
+
+        #region User Actions (Open, Save, Copy/Paste)
+
+        private void PerformSelectAllAction()
         {
             lvFiles.BeginUpdate();
-            lvFiles.Items.Clear();
-            lvFiles.Columns.Clear();
-
-            lvFiles.Columns.Add("File Name", 300);
-            lvFiles.Columns.Add("Hash", 220);
-            lvFiles.Columns.Add("Status", 100);
-
-            if (mode == "Verification") lvFiles.Columns.Add("Expected Hash", 220);
-            if (_menuOptionsTime != null && _menuOptionsTime.Checked) lvFiles.Columns.Add("Time", 80);
-
+            foreach (ListViewItem item in lvFiles.Items) item.Selected = true;
             lvFiles.EndUpdate();
-            this.Text = (mode == "Verification") ? "SharpSFV - Verify" : $"SharpSFV - Create [{_currentHashType}]";
+        }
+
+        private void PerformCopyAction()
+        {
+            if (lvFiles.SelectedItems.Count == 0) return;
+            var sb = new System.Text.StringBuilder();
+            foreach (ListViewItem item in lvFiles.SelectedItems)
+            {
+                // Tab-separated for easy Excel pasting
+                string line = $"{item.Text}\t{item.SubItems[1].Text}\t{item.SubItems[2].Text}";
+                sb.AppendLine(line);
+            }
+            try { Clipboard.SetText(sb.ToString()); }
+            catch (Exception ex) { MessageBox.Show($"Clipboard Error: {ex.Message}"); }
+        }
+
+        private async void PerformPasteAction()
+        {
+            if (!Clipboard.ContainsText()) return;
+            string clipboardText = Clipboard.GetText();
+            if (string.IsNullOrWhiteSpace(clipboardText)) return;
+
+            string[] lines = clipboardText.Split(new[] { "\r\n", "\r", "\n" }, StringSplitOptions.RemoveEmptyEntries);
+            List<string> validPaths = new List<string>();
+
+            foreach (string line in lines)
+            {
+                // Clean quotes and whitespace
+                string cleanPath = line.Trim().Trim('"');
+                if (string.IsNullOrWhiteSpace(cleanPath)) continue;
+                try { if (File.Exists(cleanPath) || Directory.Exists(cleanPath)) validPaths.Add(cleanPath); } catch { }
+            }
+
+            if (validPaths.Count > 0) await HandleDroppedPaths(validPaths.ToArray());
+            else MessageBox.Show("No valid paths found in clipboard.", "Paste", MessageBoxButtons.OK, MessageBoxIcon.Information);
         }
 
         private void PerformBatchExport()
         {
-            var badItems = lvFiles.Items.Cast<ListViewItem>().Where(i => i.SubItems[2].Text == "BAD" && i.Tag is FileItemData).ToList();
+            // Exports BAD files from the Master List (_allItems), ensuring even filtered items are caught
+            var badItems = _allItems.Where(i => (i.SubItems[2].Text == "BAD" || i.SubItems[2].Text.Contains("ERROR")) && i.Tag is FileItemData).ToList();
             if (badItems.Count == 0) { MessageBox.Show("No files marked as 'BAD' found."); return; }
 
             using (SaveFileDialog sfd = new SaveFileDialog { Filter = "Batch Script (*.bat)|*.bat", FileName = "delete_bad_files.bat" })
@@ -758,7 +712,7 @@ namespace SharpSFV
                         }
                         MessageBox.Show("Script saved.", "Save Complete", MessageBoxButtons.OK, MessageBoxIcon.Information);
                     }
-                    catch (Exception ex) { MessageBox.Show("Error saving script: " + ex.Message, "Save Error", MessageBoxButtons.OK, MessageBoxIcon.Error); }
+                    catch (Exception ex) { MessageBox.Show("Error saving script: " + ex.Message); }
                 }
             }
         }
@@ -773,15 +727,15 @@ namespace SharpSFV
 
         private void PerformSaveAction()
         {
-            if (lvFiles.Items.Count == 0)
+            if (_allItems.Count == 0)
             {
-                MessageBox.Show("No files in the list to save.", "Save Error", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                MessageBox.Show("No files to save.", "Save Error", MessageBoxButtons.OK, MessageBoxIcon.Information);
                 return;
             }
 
             string defaultFileName = "checksums";
             string initialDirectory = "";
-            FileItemData? firstData = lvFiles.Items.Cast<ListViewItem>().FirstOrDefault()?.Tag as FileItemData;
+            FileItemData? firstData = _allItems.FirstOrDefault()?.Tag as FileItemData;
 
             if (firstData != null && !string.IsNullOrEmpty(firstData.BaseDirectory))
             {
@@ -807,11 +761,13 @@ namespace SharpSFV
                         using (StreamWriter sw = new StreamWriter(sfd.FileName))
                         {
                             sw.WriteLine($"; Generated by SharpSFV (Signature: {_settings.CustomSignature})");
-                            foreach (ListViewItem item in lvFiles.Items)
+
+                            foreach (ListViewItem item in _allItems)
                             {
                                 string hash = item.SubItems.Count > 1 ? item.SubItems[1].Text : "";
                                 if (item.Tag is FileItemData data && !hash.Contains("...") && !hash.Equals("Pending") && !string.IsNullOrEmpty(hash))
                                 {
+                                    // Handle Absolute vs Relative preference
                                     string pathToWrite = (_menuOptionsAbsolutePaths != null && _menuOptionsAbsolutePaths.Checked)
                                         ? data.FullPath
                                         : data.RelativePath;
@@ -829,16 +785,245 @@ namespace SharpSFV
             }
         }
 
+        #endregion
+
+        #region Event Handlers & Context Menus
+
+        private void SetupDragDrop()
+        {
+            this.AllowDrop = true;
+            this.DragEnter += (s, e) => { if (e.Data!.GetDataPresent(DataFormats.FileDrop)) e.Effect = DragDropEffects.Copy; };
+            this.DragDrop += Form1_DragDrop;
+        }
+
+        private async void Form1_DragDrop(object? sender, DragEventArgs e)
+        {
+            if (_isProcessing) return;
+            string[]? paths = (string[]?)e.Data!.GetData(DataFormats.FileDrop);
+            if (paths != null && paths.Length > 0) await HandleDroppedPaths(paths);
+        }
+
+        private void CtxOpenFolder_Click(object? sender, EventArgs e)
+        {
+            if (lvFiles.SelectedItems.Count != 1) return;
+            if (lvFiles.SelectedItems[0].Tag is FileItemData data)
+            {
+                try
+                {
+                    if (File.Exists(data.FullPath)) Process.Start("explorer.exe", $"/select,\"{data.FullPath}\"");
+                    else if (Directory.Exists(Path.GetDirectoryName(data.FullPath))) Process.Start("explorer.exe", Path.GetDirectoryName(data.FullPath)!);
+                }
+                catch (Exception ex) { MessageBox.Show("Error opening folder: " + ex.Message); }
+            }
+        }
+
+        private void CtxCopyPath_Click(object? sender, EventArgs e)
+        {
+            if (lvFiles.SelectedItems.Count > 0 && lvFiles.SelectedItems[0].Tag is FileItemData data)
+                Clipboard.SetText(data.FullPath);
+        }
+
+        private void CtxCopyHash_Click(object? sender, EventArgs e)
+        {
+            if (lvFiles.SelectedItems.Count > 0)
+            {
+                string hash = lvFiles.SelectedItems[0].SubItems[1].Text;
+                if (!string.IsNullOrEmpty(hash) && !hash.Contains("...")) Clipboard.SetText(hash);
+            }
+        }
+
+        private void CtxRename_Click(object? sender, EventArgs e)
+        {
+            if (lvFiles.SelectedItems.Count != 1) return;
+            var item = lvFiles.SelectedItems[0];
+            if (item.Tag is FileItemData data)
+            {
+                string dir = Path.GetDirectoryName(data.FullPath) ?? "";
+                string oldName = Path.GetFileName(data.FullPath);
+                string newName = SimpleInputDialog.ShowDialog("Rename File", "Enter new filename:", oldName);
+
+                if (!string.IsNullOrWhiteSpace(newName) && newName != oldName)
+                {
+                    string newPath = Path.Combine(dir, newName);
+                    try
+                    {
+                        File.Move(data.FullPath, newPath);
+                        data.FullPath = newPath;
+                        if (!string.IsNullOrEmpty(data.RelativePath))
+                            data.RelativePath = Path.Combine(Path.GetDirectoryName(data.RelativePath) ?? "", newName);
+                        item.Text = newName;
+                    }
+                    catch (Exception ex) { MessageBox.Show("Error renaming file: " + ex.Message); }
+                }
+            }
+        }
+
+        private void CtxDelete_Click(object? sender, EventArgs e)
+        {
+            if (lvFiles.SelectedItems.Count != 1) return;
+            var item = lvFiles.SelectedItems[0];
+            if (item.Tag is FileItemData data)
+            {
+                if (MessageBox.Show($"Are you sure you want to permanently delete:\n{data.FullPath}?", "Confirm Delete", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) == DialogResult.Yes)
+                {
+                    try
+                    {
+                        File.Delete(data.FullPath);
+                        lvFiles.Items.Remove(item);
+                        _allItems.Remove(item);
+                    }
+                    catch (Exception ex) { MessageBox.Show("Error deleting file: " + ex.Message); }
+                }
+            }
+        }
+
+        private void CtxRemoveList_Click(object? sender, EventArgs e)
+        {
+            var selected = lvFiles.SelectedItems.Cast<ListViewItem>().ToList();
+            foreach (ListViewItem item in selected)
+            {
+                lvFiles.Items.Remove(item);
+                _allItems.Remove(item);
+            }
+        }
+
+        #endregion
+
+        #region Helpers (Filtering, Sorting, Dialogs)
+
+        private void AddAlgoMenuItem(ToolStripMenuItem parent, string text, HashType type)
+        {
+            var item = new ToolStripMenuItem(text, null, (s, e) => SetAlgorithm(type));
+            parent.DropDownItems.Add(item);
+            _algoMenuItems[type] = item;
+        }
+
+        private void SetAlgorithm(HashType type)
+        {
+            _currentHashType = type;
+            foreach (var kvp in _algoMenuItems) kvp.Value.Checked = (kvp.Key == type);
+            if (!_isProcessing) this.Text = $"SharpSFV - Create [{_currentHashType}]";
+        }
+
         private void ToggleTimeColumn()
         {
             _settings.ShowTimeTab = _menuOptionsTime?.Checked ?? false;
             bool exists = lvFiles.Columns.Cast<ColumnHeader>().Any(ch => ch.Text == "Time");
-
             if (_settings.ShowTimeTab && !exists) lvFiles.Columns.Add("Time", 80);
             else if (!_settings.ShowTimeTab && exists)
             {
                 ColumnHeader? timeColumn = lvFiles.Columns.Cast<ColumnHeader>().FirstOrDefault(ch => ch.Text == "Time");
                 if (timeColumn != null) lvFiles.Columns.Remove(timeColumn);
+            }
+        }
+
+        private void ToggleFilterPanel()
+        {
+            _settings.ShowFilterPanel = _menuOptionsFilter?.Checked ?? false;
+            if (_filterPanel != null) _filterPanel.Visible = _settings.ShowFilterPanel;
+        }
+
+        /// <summary>
+        /// Adds visual arrows (▲/▼) to the ListView column headers.
+        /// </summary>
+        private void UpdateSortVisuals(int column, SortOrder order)
+        {
+            const string AscArrow = " ▲";
+            const string DescArrow = " ▼";
+            foreach (ColumnHeader ch in lvFiles.Columns)
+            {
+                if (ch.Text.EndsWith(AscArrow)) ch.Text = ch.Text.Substring(0, ch.Text.Length - AscArrow.Length);
+                else if (ch.Text.EndsWith(DescArrow)) ch.Text = ch.Text.Substring(0, ch.Text.Length - DescArrow.Length);
+                if (ch.Index == column)
+                {
+                    if (order == SortOrder.Ascending) ch.Text += AscArrow;
+                    else if (order == SortOrder.Descending) ch.Text += DescArrow;
+                }
+            }
+        }
+
+        private void LvFiles_ColumnClick(object? sender, ColumnClickEventArgs e)
+        {
+            if (_isProcessing) return;
+            if (e.Column != _lvwColumnSorter.SortColumn)
+            {
+                _lvwColumnSorter.SortColumn = e.Column;
+                _lvwColumnSorter.Order = SortOrder.Ascending;
+            }
+            else
+            {
+                _lvwColumnSorter.Order = (_lvwColumnSorter.Order == SortOrder.Ascending) ? SortOrder.Descending : SortOrder.Ascending;
+            }
+            this.lvFiles.Sort();
+            UpdateSortVisuals(e.Column, _lvwColumnSorter.Order);
+        }
+
+        private void ApplyFilter()
+        {
+            if (_txtFilter == null || _cmbStatusFilter == null) return;
+            string searchText = _txtFilter.Text.Trim();
+            string statusFilter = _cmbStatusFilter.SelectedItem?.ToString() ?? "All";
+
+            lvFiles.BeginUpdate();
+            lvFiles.Items.Clear();
+            foreach (var item in _allItems)
+            {
+                bool matchName = string.IsNullOrEmpty(searchText) || item.Text.Contains(searchText, StringComparison.OrdinalIgnoreCase);
+                string itemStatus = item.SubItems[2].Text;
+                bool matchStatus = statusFilter == "All";
+                if (!matchStatus)
+                {
+                    if (statusFilter == "BAD") matchStatus = itemStatus == "BAD" || itemStatus.Contains("ERROR") || itemStatus.Contains("NOT_FOUND");
+                    else matchStatus = itemStatus.Equals(statusFilter, StringComparison.OrdinalIgnoreCase);
+                }
+                if (matchName && matchStatus) lvFiles.Items.Add(item);
+            }
+            lvFiles.EndUpdate();
+        }
+
+        /// <summary>
+        /// Attempts to find the longest common path prefix for a list of directories.
+        /// </summary>
+        private string FindCommonBasePath(List<string> paths)
+        {
+            if (paths == null || paths.Count == 0) return "";
+            if (paths.Count == 1) return paths[0];
+
+            string[] shortestPathParts = paths.OrderBy(p => p.Length).First().Split(Path.DirectorySeparatorChar, StringSplitOptions.RemoveEmptyEntries);
+            string commonPath = "";
+
+            for (int i = 0; i < shortestPathParts.Length; i++)
+            {
+                string currentSegment = shortestPathParts[i];
+                bool allMatch = true;
+                foreach (string path in paths)
+                {
+                    string[] otherPathParts = path.Split(Path.DirectorySeparatorChar, StringSplitOptions.RemoveEmptyEntries);
+                    if (i >= otherPathParts.Length || !otherPathParts[i].Equals(currentSegment, StringComparison.OrdinalIgnoreCase))
+                    {
+                        allMatch = false;
+                        break;
+                    }
+                }
+                if (allMatch) commonPath = Path.Combine(commonPath, currentSegment);
+                else break;
+            }
+            if (commonPath.Length > 0 && commonPath.IndexOf(':') == 1 && Path.IsPathRooted(paths[0]))
+            {
+                return paths[0].Substring(0, 3) + commonPath.Substring(3);
+            }
+            return commonPath;
+        }
+
+        private void UpdateStats(int current, int total, int ok, int bad, int missing)
+        {
+            if (_lblProgress != null) _lblProgress.Text = $"Completed files: {current} / {total}";
+            if (_lblStatsRow != null)
+            {
+                _lblStatsRow.Text = $"OK: {ok}     BAD: {bad}     MISSING: {missing}";
+                if (bad > 0 || missing > 0) _lblStatsRow.ForeColor = Color.Red;
+                else if (ok > 0) _lblStatsRow.ForeColor = Color.DarkGreen;
+                else _lblStatsRow.ForeColor = Color.Black;
             }
         }
 
@@ -852,37 +1037,24 @@ namespace SharpSFV
             credits.MaximizeBox = false;
             credits.MinimizeBox = false;
 
-            Label lbl = new Label();
-            lbl.Text = "SharpSFV v1.0\n\nHigh Performance Hasher.\nInspired by QuickSFV.";
-            lbl.AutoSize = false;
-            lbl.TextAlign = ContentAlignment.MiddleCenter;
-            lbl.Dock = DockStyle.Top;
-            lbl.Height = 80;
-            lbl.Padding = new Padding(0, 20, 0, 0);
-
-            LinkLabel link = new LinkLabel();
-            link.Text = "Visit GitHub Repository";
-            link.TextAlign = ContentAlignment.MiddleCenter;
-            link.Dock = DockStyle.Top;
-            link.LinkClicked += (s, e) => {
-                try { Process.Start(new ProcessStartInfo { FileName = "https://github.com/your-username/SharpSFV", UseShellExecute = true }); }
-                catch (Exception ex) { MessageBox.Show($"Could not open link: {ex.Message}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error); }
-            };
-
-            Button btnOk = new Button();
-            btnOk.Text = "OK";
-            btnOk.DialogResult = DialogResult.OK;
-            btnOk.Location = new Point((credits.ClientSize.Width - 80) / 2, 120);
-            btnOk.Size = new Size(80, 30);
+            Label lbl = new Label { Text = "SharpSFV v2.08\n\nHigh Performance Hasher.\nInspired by QuickSFV.", AutoSize = false, TextAlign = ContentAlignment.MiddleCenter, Dock = DockStyle.Top, Height = 80, Padding = new Padding(0, 20, 0, 0) };
+            LinkLabel link = new LinkLabel { Text = "Visit GitHub Repository", TextAlign = ContentAlignment.MiddleCenter, Dock = DockStyle.Top };
+            link.LinkClicked += (s, e) => { try { Process.Start(new ProcessStartInfo { FileName = "https://github.com/Wishwanderer/SharpSFV", UseShellExecute = true }); } catch { } };
+            Button btnOk = new Button { Text = "OK", DialogResult = DialogResult.OK, Location = new Point((credits.ClientSize.Width - 80) / 2, 120), Size = new Size(80, 30) };
 
             credits.Controls.Add(btnOk);
             credits.Controls.Add(link);
             credits.Controls.Add(lbl);
             credits.ShowDialog();
         }
+
+        #endregion
     }
 
-    // New Helper class for Rename Input
+    /// <summary>
+    /// A simple input dialog for text entry (e.g., renaming files).
+    /// Used to avoid adding Visual Basic references.
+    /// </summary>
     public static class SimpleInputDialog
     {
         public static string ShowDialog(string caption, string text, string defaultValue = "")
