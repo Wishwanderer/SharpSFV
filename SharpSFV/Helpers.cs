@@ -1,13 +1,16 @@
-﻿using System;
+using System;
 using System.Collections;
 using System.IO;
-using System.IO.Hashing;
+using System.IO.Hashing; // Requires System.IO.Hashing NuGet package or .NET 6+ built-in
 using System.Security.Cryptography;
 using System.Threading.Tasks;
 using System.Windows.Forms;
 
 namespace SharpSFV
 {
+    /// <summary>
+    /// Supported hashing algorithms.
+    /// </summary>
     public enum HashType
     {
         XxHash3,
@@ -17,17 +20,32 @@ namespace SharpSFV
         SHA256
     }
 
-    // 1. Data Model
+    /// <summary>
+    /// Represents the data model for a single file within the ListView.
+    /// Stored in the ListViewItem.Tag property.
+    /// </summary>
     public class FileItemData
     {
+        /// <summary>The absolute path to the file on the disk.</summary>
         public string FullPath { get; set; } = "";
+
+        /// <summary>The path relative to the base directory (used for creation).</summary>
         public string RelativePath { get; set; } = "";
+
+        /// <summary>The root directory used to calculate the RelativePath.</summary>
         public string BaseDirectory { get; set; } = "";
+
+        /// <summary>The expected hash value (used only during verification).</summary>
         public string ExpectedHash { get; set; } = "";
+
+        /// <summary>The original index of the item, used for default sorting.</summary>
         public int Index { get; set; }
     }
 
-    // 2. Sorting Logic (Unchanged)
+    /// <summary>
+    /// Implements custom sorting logic for the ListView.
+    /// Supports sorting by Column (Text) or by original Index.
+    /// </summary>
     public class ListViewColumnSorter : IComparer
     {
         public int SortColumn { get; set; } = -1;
@@ -38,6 +56,7 @@ namespace SharpSFV
         {
             if (x is ListViewItem listviewX && y is ListViewItem listviewY)
             {
+                // If no sort order is selected, sort by the original file index (FileItemData.Index)
                 if (Order == SortOrder.None)
                 {
                     if (listviewX.Tag is FileItemData dataX && listviewY.Tag is FileItemData dataY)
@@ -47,9 +66,11 @@ namespace SharpSFV
                     return 0;
                 }
 
+                // Get text from the column being sorted
                 string textX = listviewX.SubItems.Count > SortColumn ? listviewX.SubItems[SortColumn].Text : "";
                 string textY = listviewY.SubItems.Count > SortColumn ? listviewY.SubItems[SortColumn].Text : "";
 
+                // Compare text
                 int compareResult = ObjectCompare.Compare(textX, textY);
 
                 if (Order == SortOrder.Ascending) return compareResult;
@@ -59,8 +80,10 @@ namespace SharpSFV
         }
     }
 
-    // 3. New Helper: Progress Stream Wrapper
-    // This allows us to hook into the read process of ANY algorithm (MD5.ComputeHash, etc.)
+    /// <summary>
+    /// A wrapper around a standard Stream that reports read progress.
+    /// Essential for updating the UI progress bar during the hashing of large individual files.
+    /// </summary>
     public class ProgressStream : Stream
     {
         private readonly Stream _innerStream;
@@ -82,12 +105,13 @@ namespace SharpSFV
             _bytesRead += read;
             if (_totalLength > 0)
             {
+                // Report progress as a percentage (0-100)
                 _progress?.Report((double)_bytesRead / _totalLength * 100);
             }
             return read;
         }
 
-        // Mandatory overrides for Stream class
+        // Standard Stream overrides delegating to inner stream
         public override bool CanRead => _innerStream.CanRead;
         public override bool CanSeek => _innerStream.CanSeek;
         public override bool CanWrite => _innerStream.CanWrite;
@@ -99,12 +123,20 @@ namespace SharpSFV
         public override void Write(byte[] buffer, int offset, int count) => _innerStream.Write(buffer, offset, count);
     }
 
-    // 4. Hash Logic
+    /// <summary>
+    /// Static helper methods for computing file hashes.
+    /// </summary>
     public static class HashHelper
     {
-        private const int BufferSize = 1024 * 1024; // 1MB Buffer
+        private const int BufferSize = 1024 * 1024; // 1MB Buffer for read operations
 
-        // Update signature to accept IProgress
+        /// <summary>
+        /// Computes the hash of a file asynchronously, reporting progress.
+        /// </summary>
+        /// <param name="filePath">Full path to the file.</param>
+        /// <param name="type">The hashing algorithm to use.</param>
+        /// <param name="progress">Optional progress reporter.</param>
+        /// <returns>The hexadecimal hash string, or error code.</returns>
         public static Task<string> ComputeHashAsync(string filePath, HashType type, IProgress<double>? progress = null)
         {
             return Task.Run(() =>
@@ -115,11 +147,8 @@ namespace SharpSFV
                 {
                     using (var fs = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.Read, BufferSize, FileOptions.SequentialScan))
                     {
-                        // Wrap the FileStream in our ProgressStream if progress is requested
+                        // Wrap the file stream in our ProgressStream if a reporter was provided
                         Stream streamToRead = (progress != null) ? new ProgressStream(fs, progress) : fs;
-
-                        // NOTE: If using ProgressStream, we don't need to manually calculate loop progress
-                        // because the ProgressStream does it inside .Read()
 
                         byte[] buffer = new byte[BufferSize];
                         int bytesRead;
@@ -159,6 +188,9 @@ namespace SharpSFV
             });
         }
 
+        /// <summary>
+        /// Formats byte size into human-readable strings (KB, MB, GB).
+        /// </summary>
         public static string FormatSize(long bytes)
         {
             string[] sizes = { "B", "KB", "MB", "GB", "TB" };
