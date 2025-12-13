@@ -4,7 +4,7 @@
 
 ## Improvements over QuickSFV
 
-SharpSFV addresses several limitations of the original QuickSFV engine to meet modern computing standards:
+SharpSFV addresses a number of limitations of the original QuickSFV engine to meet modern computing standards:
 
 *   **Modern Algorithms:** Implements xxHash-3 (128-bit), which is significantly faster and more secure than the standard CRC-32 used by QuickSFV.
 *   **Recursive Scanning:** Native support for dragging and dropping folders to automatically find and hash all files within them and their subdirectories.
@@ -55,7 +55,7 @@ Settings are stored in `SharpSFV.ini`. You can modify them via the **Options** m
 ## Build Requirements
 
 *   **IDE:** Visual Studio 2022 (or newer) or JetBrains Rider.
-*   **Framework:** .NET 6.0 (or newer).
+*   **Framework:** .NET 8.0 (or newer).
 *   **Dependencies:** `System.IO.Hashing` (NuGet package).
 
 ## License
