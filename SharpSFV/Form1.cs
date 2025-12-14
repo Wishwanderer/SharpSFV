@@ -53,21 +53,16 @@ namespace SharpSFV
         #endregion
 
         #region Constructor & Initialization
-
         public Form1()
         {
             InitializeComponent();
-
-            // Initialize Settings using the Executable Path to ensure INI is found correctly
             _settings = new AppSettings(Application.ExecutablePath);
             _lvwColumnSorter = new ListViewColumnSorter();
-
             _settings.Load();
-
-            // Setup ListView Sorting
             this.lvFiles.ListViewItemSorter = _lvwColumnSorter;
             this.lvFiles.ColumnClick += LvFiles_ColumnClick;
             this.FormClosing += Form1_FormClosing;
+            this.Shown += Form1_Shown;
 
             // Initialize UI Layout
             SetupCustomMenu();
@@ -76,18 +71,20 @@ namespace SharpSFV
             SetupFilterPanel();
             SetupDragDrop();
 
-            // Apply loaded settings (Window size, algorithm, etc.)
             ApplySettings();
-            SetupLayout(); // Finalize layout dockings
+            SetupLayout();
 
             this.Text = "SharpSFV";
         }
 
-        private async void Form1_Load(object? sender, EventArgs e)
+        private async void Form1_Shown(object? sender, EventArgs e)
         {
-            // Handle Command Line Arguments (e.g. "Open With" from Explorer)
+            await Task.Delay(100);
             string[] args = Environment.GetCommandLineArgs();
-            if (args.Length > 1) await HandleDroppedPaths(args.Skip(1).ToArray());
+            if (args.Length > 1)
+            {
+                await HandleDroppedPaths(args.Skip(1).ToArray());
+            }
         }
 
         #endregion
@@ -1057,14 +1054,23 @@ namespace SharpSFV
 
         private void UpdateStats(int current, int total, int ok, int bad, int missing)
         {
-            if (_lblProgress != null) _lblProgress.Text = $"Completed files: {current} / {total}";
+            if (_lblProgress != null)
+            {
+                _lblProgress.Text = $"Completed files: {current} / {total}";
+                _lblProgress.Update();
+            }
+
             if (_lblStatsRow != null)
             {
                 _lblStatsRow.Text = $"OK: {ok}     BAD: {bad}     MISSING: {missing}";
                 if (bad > 0 || missing > 0) _lblStatsRow.ForeColor = Color.Red;
                 else if (ok > 0) _lblStatsRow.ForeColor = Color.DarkGreen;
                 else _lblStatsRow.ForeColor = Color.Black;
+                _lblStatsRow.Update();
             }
+
+            // Optional: If the progress bar also lags visually
+            progressBarTotal.Update();
         }
 
         private void ShowCredits()
@@ -1077,7 +1083,7 @@ namespace SharpSFV
             credits.MaximizeBox = false;
             credits.MinimizeBox = false;
 
-            Label lbl = new Label { Text = "SharpSFV v2.08\n\nHigh Performance Hasher.\nInspired by QuickSFV.", AutoSize = false, TextAlign = ContentAlignment.MiddleCenter, Dock = DockStyle.Top, Height = 80, Padding = new Padding(0, 20, 0, 0) };
+            Label lbl = new Label { Text = "SharpSFV v2.10\n\nHigh Performance Hasher.\nInspired by QuickSFV.", AutoSize = false, TextAlign = ContentAlignment.MiddleCenter, Dock = DockStyle.Top, Height = 80, Padding = new Padding(0, 20, 0, 0) };
             LinkLabel link = new LinkLabel { Text = "Visit GitHub Repository", TextAlign = ContentAlignment.MiddleCenter, Dock = DockStyle.Top };
             link.LinkClicked += (s, e) => { try { Process.Start(new ProcessStartInfo { FileName = "https://github.com/Wishwanderer/SharpSFV", UseShellExecute = true }); } catch { } };
             Button btnOk = new Button { Text = "OK", DialogResult = DialogResult.OK, Location = new Point((credits.ClientSize.Width - 80) / 2, 120), Size = new Size(80, 30) };
