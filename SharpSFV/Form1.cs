@@ -320,6 +320,8 @@ namespace SharpSFV
         {
             if (paths.Length == 0) return;
 
+            string[] absolutePaths = paths.Select(p => Path.GetFullPath(p)).ToArray();
+
             bool containsFolder = paths.Any(p => Directory.Exists(p));
 
             // Reset backend sorting and visuals
