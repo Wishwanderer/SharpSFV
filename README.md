@@ -44,6 +44,11 @@ SharpSFV addresses a number of limitations of the original QuickSFV engine to me
 2.  SharpSFV will automatically parse the file and verify all entries relative to the checksum file's location.
 3.  Files will be marked as **OK** (Green), **BAD** (Red), or **MISSING** (Strikethrough).
 
+## Usage
+```
+SharpSFV <checksum.sfv/md5/sha1/sha256/xxh3>
+```
+
 ## Configuration
 
 Settings are stored in `SharpSFV.ini`. You can modify them via the **Options** menu:
@@ -52,6 +57,10 @@ Settings are stored in `SharpSFV.ini`. You can modify them via the **Options** m
 *   **Always Save Absolute Paths:** Forces the output file to use full drive paths instead of relative paths.
 *   **Show Search/Filter Bar:** Toggles the visibility of the filtering toolbar.
 
+## Building
+```
+dotnet publish -c Release -r win-x64 --self-contained false -p:PublishSingleFile=true
+```
 ## Build Requirements
 
 *   **IDE:** Visual Studio 2022 (or newer) or JetBrains Rider.
