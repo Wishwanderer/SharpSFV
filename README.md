@@ -48,7 +48,7 @@ SharpSFV addresses the limitations of legacy tools to meet modern computing stan
 You can open SharpSFV and immediately verify a file by passing it as an argument:
 ```cmd
 SharpSFV.exe <checksum_file.sfv>
-
+```
 ## Usage
 ```
 SharpSFV <checksum.sfv/md5/sha1/sha256/xxh3>
