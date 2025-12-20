@@ -1,10 +1,12 @@
 using System;
 using System.Collections;
+using System.Collections.Generic;
+using System.Drawing;
 using System.IO;
-using System.IO.Hashing; // Requires System.IO.Hashing NuGet package or .NET 6+ built-in
+using System.IO.Hashing; // Requires System.IO.Hashing NuGet
 using System.Security.Cryptography;
+using System.Threading;
 using System.Threading.Tasks;
-using System.Windows.Forms;
 
 namespace SharpSFV
 {
@@ -13,76 +15,88 @@ namespace SharpSFV
     /// </summary>
     public enum HashType
     {
-        XxHash3,
-        Crc32,
-        MD5,
+        XxHash3, // Fastest, non-cryptographic (Default)
+        Crc32,   // Standard for SFV files
+        MD5,     // Legacy standard
         SHA1,
         SHA256
     }
 
     /// <summary>
-    /// Represents the data model for a single file within the ListView.
-    /// Stored in the ListViewItem.Tag property.
+    /// Represents a single file entry in the UI.
+    /// Used by Virtual Mode ListView to avoid creating heavy ListViewItems for every row.
     /// </summary>
     public class FileItemData
     {
-        /// <summary>The absolute path to the file on the disk.</summary>
         public string FullPath { get; set; } = "";
-
-        /// <summary>The path relative to the base directory (used for creation).</summary>
+        public string FileName { get; set; } = "";
         public string RelativePath { get; set; } = "";
-
-        /// <summary>The root directory used to calculate the RelativePath.</summary>
         public string BaseDirectory { get; set; } = "";
-
-        /// <summary>The expected hash value (used only during verification).</summary>
         public string ExpectedHash { get; set; } = "";
 
-        /// <summary>The original index of the item, used for default sorting.</summary>
-        public int Index { get; set; }
+        // Used to maintain stable sort order when no specific column is selected
+        public int OriginalIndex { get; set; }
+
+        public string CalculatedHash { get; set; } = "Pending";
+        public string Status { get; set; } = "Queued";
+        public string TimeStr { get; set; } = "";
+
+        // --- VISUAL PINNING OPTIMIZATION ---
+        // If true, this item is temporarily moved to the top of the list 
+        // so the user can see progress on large files without scrolling.
+        public bool IsPinned { get; set; } = false;
+
+        public Color ForeColor { get; set; } = SystemColors.ControlText;
+        public Color BackColor { get; set; } = SystemColors.Window;
+        public FontStyle FontStyle { get; set; } = FontStyle.Regular;
     }
 
     /// <summary>
-    /// Implements custom sorting logic for the ListView.
-    /// Supports sorting by Column (Text) or by original Index.
+    /// Custom comparer for sorting the ListView.
+    /// Critical Logic: Pinned items (Active Large Files) ALWAYS float to the top.
     /// </summary>
-    public class ListViewColumnSorter : IComparer
+    public class FileListSorter : IComparer<FileItemData>
     {
         public int SortColumn { get; set; } = -1;
         public SortOrder Order { get; set; } = SortOrder.None;
-        private CaseInsensitiveComparer ObjectCompare = new CaseInsensitiveComparer();
+        private CaseInsensitiveComparer _objectCompare = new CaseInsensitiveComparer();
 
-        public int Compare(object? x, object? y)
+        public int Compare(FileItemData? x, FileItemData? y)
         {
-            if (x is ListViewItem listviewX && y is ListViewItem listviewY)
+            if (x == null || y == null) return 0;
+
+            // --- PRIORITY LOGIC ---
+            // If an item is Pinned (Processing Large File), it must appear at the top
+            // regardless of the current column sort order.
+            if (x.IsPinned && !y.IsPinned) return -1;
+            if (!x.IsPinned && y.IsPinned) return 1;
+
+            // Default stable sort based on insertion order
+            if (Order == SortOrder.None) return x.OriginalIndex.CompareTo(y.OriginalIndex);
+
+            int compareResult = 0;
+            switch (SortColumn)
             {
-                // If no sort order is selected, sort by the original file index (FileItemData.Index)
-                if (Order == SortOrder.None)
-                {
-                    if (listviewX.Tag is FileItemData dataX && listviewY.Tag is FileItemData dataY)
-                    {
-                        return dataX.Index.CompareTo(dataY.Index);
-                    }
-                    return 0;
-                }
-
-                // Get text from the column being sorted
-                string textX = listviewX.SubItems.Count > SortColumn ? listviewX.SubItems[SortColumn].Text : "";
-                string textY = listviewY.SubItems.Count > SortColumn ? listviewY.SubItems[SortColumn].Text : "";
-
-                // Compare text
-                int compareResult = ObjectCompare.Compare(textX, textY);
-
-                if (Order == SortOrder.Ascending) return compareResult;
-                else if (Order == SortOrder.Descending) return (-compareResult);
+                case 0: compareResult = _objectCompare.Compare(x.FileName, y.FileName); break;
+                case 1: compareResult = _objectCompare.Compare(x.CalculatedHash, y.CalculatedHash); break;
+                case 2: compareResult = _objectCompare.Compare(x.Status, y.Status); break;
+                case 3:
+                case 4:
+                    // Sorts either Expected Hash OR Time depending on what data is populated
+                    string valX = !string.IsNullOrEmpty(x.ExpectedHash) ? x.ExpectedHash : x.TimeStr;
+                    string valY = !string.IsNullOrEmpty(y.ExpectedHash) ? y.ExpectedHash : y.TimeStr;
+                    compareResult = _objectCompare.Compare(valX, valY);
+                    break;
+                default: compareResult = 0; break;
             }
-            return 0;
+            if (Order == SortOrder.Descending) compareResult = -compareResult;
+            return compareResult;
         }
     }
 
     /// <summary>
-    /// A wrapper around a standard Stream that reports read progress.
-    /// Essential for updating the UI progress bar during the hashing of large individual files.
+    /// A wrapper around FileStream to report progress without checking stream position constantly.
+    /// Includes throttling to prevent UI event flooding.
     /// </summary>
     public class ProgressStream : Stream
     {
@@ -90,6 +104,7 @@ namespace SharpSFV
         private readonly IProgress<double> _progress;
         private readonly long _totalLength;
         private long _bytesRead;
+        private double _lastReported = 0;
 
         public ProgressStream(Stream innerStream, IProgress<double> progress)
         {
@@ -105,13 +120,19 @@ namespace SharpSFV
             _bytesRead += read;
             if (_totalLength > 0)
             {
-                // Report progress as a percentage (0-100)
-                _progress?.Report((double)_bytesRead / _totalLength * 100);
+                // PERFORMANCE: Only report progress if it has changed by at least 0.1%.
+                // Reporting every byte read would freeze the UI thread.
+                double newPercent = (double)_bytesRead / _totalLength * 100;
+                if (newPercent - _lastReported >= 0.1)
+                {
+                    _progress?.Report(newPercent);
+                    _lastReported = newPercent;
+                }
             }
             return read;
         }
 
-        // Standard Stream overrides delegating to inner stream
+        // Boilerplate Stream implementation
         public override bool CanRead => _innerStream.CanRead;
         public override bool CanSeek => _innerStream.CanSeek;
         public override bool CanWrite => _innerStream.CanWrite;
@@ -123,21 +144,14 @@ namespace SharpSFV
         public override void Write(byte[] buffer, int offset, int count) => _innerStream.Write(buffer, offset, count);
     }
 
-    /// <summary>
-    /// Static helper methods for computing file hashes.
-    /// </summary>
     public static class HashHelper
     {
-        private const int BufferSize = 1024 * 1024; // 1MB Buffer for read operations
+        private const int BufferSize = 1024 * 1024; // 1MB Buffer for optimal I/O
 
         /// <summary>
-        /// Computes the hash of a file asynchronously, reporting progress.
+        /// Computes the hash of a file asynchronously on a worker thread.
         /// </summary>
-        /// <param name="filePath">Full path to the file.</param>
-        /// <param name="type">The hashing algorithm to use.</param>
-        /// <param name="progress">Optional progress reporter.</param>
-        /// <returns>The hexadecimal hash string, or error code.</returns>
-        public static Task<string> ComputeHashAsync(string filePath, HashType type, IProgress<double>? progress = null)
+        public static Task<string> ComputeHashAsync(string filePath, HashType type, IProgress<double>? progress = null, CancellationToken token = default)
         {
             return Task.Run(() =>
             {
@@ -145,9 +159,10 @@ namespace SharpSFV
 
                 try
                 {
+                    // SequentialScan hint tells Windows to cache aggressively for forward reading
                     using (var fs = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.Read, BufferSize, FileOptions.SequentialScan))
                     {
-                        // Wrap the file stream in our ProgressStream if a reporter was provided
+                        // Wrap in ProgressStream only if a progress reporter was actually passed
                         Stream streamToRead = (progress != null) ? new ProgressStream(fs, progress) : fs;
 
                         byte[] buffer = new byte[BufferSize];
@@ -155,29 +170,32 @@ namespace SharpSFV
 
                         switch (type)
                         {
+                            // Optimized non-allocating loops for System.IO.Hashing (XxHash3, Crc32)
                             case HashType.XxHash3:
                                 var xx3 = new XxHash128();
                                 while ((bytesRead = streamToRead.Read(buffer, 0, buffer.Length)) > 0)
+                                {
+                                    if (token.IsCancellationRequested) return "CANCELLED";
                                     xx3.Append(new ReadOnlySpan<byte>(buffer, 0, bytesRead));
+                                }
                                 return Convert.ToHexString(xx3.GetCurrentHash()).ToLowerInvariant();
 
                             case HashType.Crc32:
                                 var crc = new Crc32();
                                 while ((bytesRead = streamToRead.Read(buffer, 0, buffer.Length)) > 0)
+                                {
+                                    if (token.IsCancellationRequested) return "CANCELLED";
                                     crc.Append(new ReadOnlySpan<byte>(buffer, 0, bytesRead));
+                                }
                                 return Convert.ToHexString(crc.GetCurrentHash()).ToLowerInvariant();
 
+                            // Standard .NET Cryptography wrappers
                             case HashType.MD5:
-                                using (var md5 = MD5.Create())
-                                    return Convert.ToHexString(md5.ComputeHash(streamToRead)).ToLowerInvariant();
-
+                                using (var md5 = MD5.Create()) return Convert.ToHexString(md5.ComputeHash(streamToRead)).ToLowerInvariant();
                             case HashType.SHA1:
-                                using (var sha1 = SHA1.Create())
-                                    return Convert.ToHexString(sha1.ComputeHash(streamToRead)).ToLowerInvariant();
-
+                                using (var sha1 = SHA1.Create()) return Convert.ToHexString(sha1.ComputeHash(streamToRead)).ToLowerInvariant();
                             case HashType.SHA256:
-                                using (var sha256 = SHA256.Create())
-                                    return Convert.ToHexString(sha256.ComputeHash(streamToRead)).ToLowerInvariant();
+                                using (var sha256 = SHA256.Create()) return Convert.ToHexString(sha256.ComputeHash(streamToRead)).ToLowerInvariant();
 
                             default: return "UNKNOWN_ALGO";
                         }
@@ -186,22 +204,6 @@ namespace SharpSFV
                 catch (IOException) { return "ACCESS_DENIED"; }
                 catch (Exception) { return "ERROR"; }
             });
-        }
-
-        /// <summary>
-        /// Formats byte size into human-readable strings (KB, MB, GB).
-        /// </summary>
-        public static string FormatSize(long bytes)
-        {
-            string[] sizes = { "B", "KB", "MB", "GB", "TB" };
-            double len = bytes;
-            int order = 0;
-            while (len >= 1024 && order < sizes.Length - 1)
-            {
-                order++;
-                len = len / 1024;
-            }
-            return $"{len:0.##} {sizes[order]}";
         }
     }
 }

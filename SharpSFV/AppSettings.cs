@@ -6,38 +6,31 @@ using System.Windows.Forms;
 namespace SharpSFV
 {
     /// <summary>
-    /// Manages application configuration using a simple local INI file.
+    /// Manages application configuration via a simple local .ini file.
+    /// This avoids the complexity of .NET UserScopes and allows for portable installations.
     /// </summary>
     public class AppSettings
     {
         private readonly string _iniPath;
 
-        // --- Configuration Properties ---
         public bool ShowTimeTab { get; set; } = false;
         public bool UseAbsolutePaths { get; set; } = false;
         public bool ShowFilterPanel { get; set; } = false;
+        public bool OptimizeForHDD { get; set; } = false;
+
         public string CustomSignature { get; set; } = "L33T";
         public HashType DefaultAlgo { get; set; } = HashType.XxHash3;
 
-        // Window State
         public Size WindowSize { get; set; } = new Size(800, 600);
         public Point WindowLocation { get; set; } = Point.Empty;
         public bool HasCustomLocation { get; private set; } = false;
 
-        /// <summary>
-        /// Initializes settings path based on the executable location.
-        /// </summary>
-        /// <param name="appExecutablePath">Application.ExecutablePath</param>
         public AppSettings(string appExecutablePath)
         {
             string exeDir = Path.GetDirectoryName(appExecutablePath) ?? AppDomain.CurrentDomain.BaseDirectory;
             _iniPath = Path.Combine(exeDir, "SharpSFV.ini");
         }
 
-        /// <summary>
-        /// Reads the INI file and populates properties.
-        /// Handles corrupt lines gracefully.
-        /// </summary>
         public void Load()
         {
             if (!File.Exists(_iniPath)) return;
@@ -58,35 +51,20 @@ namespace SharpSFV
                     string key = parts[0].Trim();
                     string val = parts[1].Trim();
 
-                    // Boolean toggles
-                    if (key.Equals("TimeTab", StringComparison.OrdinalIgnoreCase))
-                        ShowTimeTab = (val == "1");
-                    else if (key.Equals("UseAbsolutePaths", StringComparison.OrdinalIgnoreCase))
-                        UseAbsolutePaths = (val == "1");
-                    else if (key.Equals("ShowFilterPanel", StringComparison.OrdinalIgnoreCase))
-                        ShowFilterPanel = (val == "1");
-
-                    // Strings & Enums
-                    else if (key.Equals("Signature", StringComparison.OrdinalIgnoreCase))
-                        CustomSignature = val;
+                    // Basic key-value parsing
+                    if (key.Equals("TimeTab", StringComparison.OrdinalIgnoreCase)) ShowTimeTab = (val == "1");
+                    else if (key.Equals("UseAbsolutePaths", StringComparison.OrdinalIgnoreCase)) UseAbsolutePaths = (val == "1");
+                    else if (key.Equals("ShowFilterPanel", StringComparison.OrdinalIgnoreCase)) ShowFilterPanel = (val == "1");
+                    else if (key.Equals("OptimizeForHDD", StringComparison.OrdinalIgnoreCase)) OptimizeForHDD = (val == "1");
+                    else if (key.Equals("Signature", StringComparison.OrdinalIgnoreCase)) CustomSignature = val;
                     else if (key.Equals("DefaultAlgo", StringComparison.OrdinalIgnoreCase))
                     {
                         if (Enum.TryParse<HashType>(val, true, out var result)) DefaultAlgo = result;
                     }
-
-                    // Window Geometry
-                    else if (key.Equals("WindowSizeW", StringComparison.OrdinalIgnoreCase))
-                        int.TryParse(val, out w);
-                    else if (key.Equals("WindowSizeH", StringComparison.OrdinalIgnoreCase))
-                        int.TryParse(val, out h);
-                    else if (key.Equals("WindowPosX", StringComparison.OrdinalIgnoreCase))
-                    {
-                        if (int.TryParse(val, out x)) foundX = true;
-                    }
-                    else if (key.Equals("WindowPosY", StringComparison.OrdinalIgnoreCase))
-                    {
-                        if (int.TryParse(val, out y)) foundY = true;
-                    }
+                    else if (key.Equals("WindowSizeW", StringComparison.OrdinalIgnoreCase)) int.TryParse(val, out w);
+                    else if (key.Equals("WindowSizeH", StringComparison.OrdinalIgnoreCase)) int.TryParse(val, out h);
+                    else if (key.Equals("WindowPosX", StringComparison.OrdinalIgnoreCase)) { if (int.TryParse(val, out x)) foundX = true; }
+                    else if (key.Equals("WindowPosY", StringComparison.OrdinalIgnoreCase)) { if (int.TryParse(val, out y)) foundY = true; }
                 }
 
                 WindowSize = new Size(w, h);
@@ -96,17 +74,14 @@ namespace SharpSFV
                     HasCustomLocation = true;
                 }
             }
-            catch { /* Ignore read errors to prevent crash on launch */ }
+            catch { /* Prevent startup crash on bad config */ }
         }
 
-        /// <summary>
-        /// Writes current application state to the INI file.
-        /// </summary>
         public void Save(Form form, bool isTimeTabEnabled, HashType currentAlgo)
         {
             try
             {
-                // Handle minimized/maximized state by using RestoreBounds
+                // Handle minimized state correctly by using RestoreBounds
                 Rectangle bounds = (form.WindowState == FormWindowState.Normal) ? form.Bounds : form.RestoreBounds;
 
                 using (StreamWriter sw = new StreamWriter(_iniPath))
@@ -115,6 +90,7 @@ namespace SharpSFV
                     sw.WriteLine($"TimeTab={(isTimeTabEnabled ? "1" : "0")}");
                     sw.WriteLine($"UseAbsolutePaths={(UseAbsolutePaths ? "1" : "0")}");
                     sw.WriteLine($"ShowFilterPanel={(ShowFilterPanel ? "1" : "0")}");
+                    sw.WriteLine($"OptimizeForHDD={(OptimizeForHDD ? "1" : "0")}");
                     sw.WriteLine($"Signature={CustomSignature}");
                     sw.WriteLine($"DefaultAlgo={currentAlgo}");
                     sw.WriteLine($"WindowSizeW={bounds.Width}");
@@ -123,7 +99,7 @@ namespace SharpSFV
                     sw.WriteLine($"WindowPosY={bounds.Y}");
                 }
             }
-            catch { /* Ignore write permission errors */ }
+            catch { }
         }
     }
 }

@@ -5,7 +5,6 @@ namespace SharpSFV
         [STAThread]
         static void Main()
         {
-            // Wrap the startup in a Try/Catch to catch missing DLLs/Init failures
             try
             {
                 ApplicationConfiguration.Initialize();
@@ -13,7 +12,7 @@ namespace SharpSFV
             }
             catch (Exception ex)
             {
-                // This ensures the user sees WHY it failed (e.g., "Could not load file or assembly 'System.IO.Hashing'")
+                // Critical catch block for runtime errors (e.g., missing .NET Runtime, missing DLLs)
                 MessageBox.Show($"Critical Startup Error:\n{ex.Message}\n\nStack Trace:\n{ex.StackTrace}",
                     "SharpSFV Fatal Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
