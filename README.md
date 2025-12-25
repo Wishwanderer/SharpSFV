@@ -2,18 +2,6 @@
 
 **SharpSFV** is a modern, high-performance file hashing and verification tool built in C# (.NET 10). Designed as a spiritual successor to the classic QuickSFV, it retains a familiar, lightweight interface while introducing modern algorithms, smart hardware detection, and the robust file handling required for massive datasets.
 
-## SharpSFV Version Benchmarks
-
-Benchmark contains 500K files ranging from 1KB to 10MB
-
-* **v2.30** 
-   * **Time to generate checksums**: 121558ms (121 seconds)
-   * **Memory Usage (Checksum Generation)** : 2516 MB
-
-* **v2.40** 
-   * **Time to generate checksums**: 75002ms (75 seconds)
-   * **Memory Usage (Checksum Generation)** : 395 MB
-
 ## QuickSFV Comparison Benchmarks (MD5)
 
 Benchmark contains 500K files ranging from 1KB to 10MB
