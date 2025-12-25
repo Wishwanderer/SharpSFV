@@ -22,7 +22,7 @@ Benchmark contains 500K files ranging from 1KB to 10MB
    * **Time to check checksums**: DNF - Crashed at just under 250.000 files, in this time QuickSFV took ~103000ms (~630 seconds) to process said files.
 
 * **SharpSFV v2.40** 
-   * **Time to check checksums**: 75002ms (75 seconds)
+   * **Time to check checksums**: 74382ms (75 seconds)
 
 
 ## Improvements over QuickSFV
