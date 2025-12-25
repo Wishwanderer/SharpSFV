@@ -1,22 +1,35 @@
 ﻿<Project Sdk="Microsoft.NET.Sdk">
 
-  <PropertyGroup>
-    <OutputType>WinExe</OutputType>
-    <TargetFramework>net10.0-windows</TargetFramework>
-    <Nullable>enable</Nullable>
-    <UseWindowsForms>true</UseWindowsForms>
-    <ImplicitUsings>enable</ImplicitUsings>
-    <ApplicationIcon>SharpSFV.ico</ApplicationIcon>
-    <EnableCompressionInSingleFileBundle>true</EnableCompressionInSingleFileBundle>
-    <DebugType>none</DebugType>
-    <DebugSymbols>false</DebugSymbols>
-    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
-    <PublishReadyToRun>false</PublishReadyToRun>
-    <TieredPGO>true</TieredPGO>
-  </PropertyGroup>
+	<PropertyGroup>
+		<OutputType>WinExe</OutputType>
+		<TargetFramework>net10.0-windows</TargetFramework>
+		<Nullable>enable</Nullable>
+		<UseWindowsForms>true</UseWindowsForms>
+		<ApplicationIcon>SharpSFV.ico</ApplicationIcon>
+		<ImplicitUsings>enable</ImplicitUsings>
+		<AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+		<PublishSingleFile>true</PublishSingleFile>
+		<SelfContained>false</SelfContained>
+		<EnableCompressionInSingleFile>false</EnableCompressionInSingleFile>
+		<PublishTrimmed>false</PublishTrimmed>
+		<IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+		<TieredPGO>true</TieredPGO>
+		<ClientOnly>false</ClientOnly>
+		<GarbageCollectionAdaptationMode>1</GarbageCollectionAdaptationMode>
+		<AssemblyName>SharpSFV</AssemblyName>
+		<RootNamespace>SharpSFV</RootNamespace>
+		<FileVersion>2.7.0.0</FileVersion>
+		<AssemblyVersion>2.7.0.0</AssemblyVersion>
+		<Description>High-performance SFV/Checksum utility.</Description>
+	</PropertyGroup>
 
-  <ItemGroup>
-    <PackageReference Include="System.IO.Hashing" Version="10.0.0" />
-  </ItemGroup>
+	<ItemGroup>
+		<PackageReference Include="System.IO.Hashing" Version="10.0.1" />
+	</ItemGroup>
+
+	<ItemGroup>
+		<EmbeddedResource Include="SharpSFV.ico" />
+	</ItemGroup>
 
 </Project>
+

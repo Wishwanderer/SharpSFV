@@ -4,184 +4,232 @@ using System.Diagnostics;
 using System.Drawing;
 using System.IO;
 using System.Linq;
-using System.Media;
+using System.Runtime;
+using System.Security.Cryptography;
 using System.Text.RegularExpressions;
 using System.Threading;
+using System.Threading.Channels;
 using System.Threading.Tasks;
 using System.Windows.Forms;
+using SharpSFV.Interop;
+using System.Buffers;
+using SharpSFV.Models;
+using SharpSFV.Utils;
 
 namespace SharpSFV
 {
     public partial class Form1
     {
-        private async Task HandleDroppedPaths(string[] paths)
-        {
-            if (paths.Length == 0) return;
-            bool containsFolder = paths.Any(p => Directory.Exists(p));
-
-            _listSorter.SortColumn = -1;
-            _listSorter.Order = SortOrder.None;
-            UpdateSortVisuals(-1, SortOrder.None);
-
-            if (!containsFolder && paths.Length == 1 && _verificationExtensions.Contains(Path.GetExtension(paths[0])) && File.Exists(paths[0]))
-            {
-                await RunVerification(paths[0]);
-            }
-            else
-            {
-                string baseDirectory = "";
-                if (paths.Length == 1 && Directory.Exists(paths[0])) baseDirectory = paths[0];
-                else
-                {
-                    var parentDirs = paths.Select(p => Path.GetDirectoryName(p) ?? p).ToList();
-                    baseDirectory = FindCommonBasePath(parentDirs);
-                }
-
-                List<string> allFilesToHash = new List<string>();
-                foreach (string path in paths)
-                {
-                    if (File.Exists(path)) allFilesToHash.Add(path);
-                    else if (Directory.Exists(path))
-                    {
-                        try { allFilesToHash.AddRange(Directory.GetFiles(path, "*.*", SearchOption.AllDirectories)); }
-                        catch (Exception ex) { MessageBox.Show($"Error accessing folder '{path}': {ex.Message}"); }
-                    }
-                }
-                await RunHashCreation(allFilesToHash.ToArray(), baseDirectory);
-            }
-        }
-
-        private async Task RunHashCreation(string[] filePaths, string baseDirectory)
+        private async Task RunHashCreation(string[] paths, string baseDirectory)
         {
             SetProcessingState(true);
             _cts = new CancellationTokenSource();
 
+            GCLatencyMode oldMode = GCSettings.LatencyMode;
+            GCSettings.LatencyMode = GCLatencyMode.SustainedLowLatency;
+
             SetupUIForMode("Creation");
-            UpdateStats(0, filePaths.Length, 0, 0, 0);
 
-            _allItems.Clear();
-            _displayList.Clear();
-            int originalIndex = 0;
-
-            foreach (var fullPath in filePaths)
-            {
-                if (Directory.Exists(fullPath)) continue;
-
-                string relativePath = "";
-                if (!string.IsNullOrEmpty(baseDirectory))
-                {
-                    try { relativePath = Path.GetRelativePath(baseDirectory, fullPath); }
-                    catch { relativePath = fullPath; }
-                }
-                else relativePath = Path.GetFileName(fullPath);
-
-                var data = new FileItemData
-                {
-                    FullPath = fullPath,
-                    FileName = Path.GetFileName(fullPath),
-                    RelativePath = relativePath,
-                    BaseDirectory = baseDirectory,
-                    OriginalIndex = originalIndex++
-                };
-                _allItems.Add(data);
-            }
-
-            _displayList.AddRange(_allItems);
+            // SoA: Clear Store
+            _fileStore.Clear();
+            _displayIndices.Clear();
             UpdateDisplayList();
-
-            if (_allItems.Count == 0) { SetProcessingState(false); return; }
-
-            progressBarTotal.Maximum = _allItems.Count;
-            progressBarTotal.Value = 0;
 
             int completed = 0, okCount = 0, errorCount = 0;
 
-            // --- DRIVE DETECTION ---
-            int maxThreads = Environment.ProcessorCount;
-            string driveMode = "SSD Mode";
-
-            if (_settings.OptimizeForHDD)
+            bool isHDD = _settings.OptimizeForHDD;
+            if (!isHDD && paths.Length > 0)
             {
-                maxThreads = 1;
-                driveMode = "HDD Mode (Forced)";
-            }
-            else if (_allItems.Count > 0 && DriveDetector.IsRotational(_allItems[0].FullPath))
-            {
-                maxThreads = 1;
-                driveMode = "HDD Mode (Detected)";
+                string testPath = Directory.Exists(paths[0]) ? paths[0] : Path.GetDirectoryName(paths[0])!;
+                isHDD = DriveDetector.IsRotational(testPath);
             }
 
-            this.Text = $"SharpSFV - Creating... [{driveMode}]";
+            int consumerCount = isHDD ? 1 : Environment.ProcessorCount;
+            this.Text = $"SharpSFV - Creating... [{(isHDD ? "HDD/Seq" : "SSD/Par")}]";
+
             Stopwatch globalSw = Stopwatch.StartNew();
 
-            try
+            // SoA: Channel carries Structs (FileJob) now
+            var channel = Channel.CreateBounded<FileJob>(new BoundedChannelOptions(50000)
             {
-                using (var semaphore = new SemaphoreSlim(maxThreads))
+                SingleReader = false,
+                SingleWriter = true,
+                FullMode = BoundedChannelFullMode.Wait
+            });
+
+            // --- PRODUCER TASK ---
+            var producer = Task.Run(async () =>
+            {
+                try
                 {
-                    var processingList = _displayList.ToList();
-                    var tasks = processingList.Select(async data =>
+                    int originalIndex = 0;
+                    var uiBatch = new List<int>(2000); // Batch indices
+                    long lastBatchTime = DateTime.UtcNow.Ticks;
+
+                    void FlushUiBatch()
                     {
-                        if (_cts.Token.IsCancellationRequested) return;
+                        if (uiBatch.Count == 0) return;
+                        var snapshot = uiBatch.ToList();
+                        uiBatch.Clear();
 
-                        await semaphore.WaitAsync(_cts.Token);
-                        try
+                        this.BeginInvoke(new Action(() =>
                         {
-                            Stopwatch sw = Stopwatch.StartNew();
-                            IProgress<double>? progress = null;
-
+                            Win32Storage.SuspendDrawing(lvFiles);
                             try
                             {
-                                long len = new FileInfo(data.FullPath).Length;
-                                if (len > LargeFileThreshold)
+                                _displayIndices.AddRange(snapshot);
+                                lvFiles.VirtualListSize = _displayIndices.Count;
+                                progressBarTotal.Maximum = _displayIndices.Count;
+                            }
+                            finally { Win32Storage.ResumeDrawing(lvFiles); }
+                        }));
+                        lastBatchTime = DateTime.UtcNow.Ticks;
+                    }
+
+                    // Pre-pool the base directory string
+                    string pooledBase = StringPool.GetOrAdd(baseDirectory);
+
+                    foreach (string path in paths)
+                    {
+                        if (_cts.Token.IsCancellationRequested) break;
+
+                        if (File.Exists(path))
+                        {
+                            await ProcessFileEntry(path, pooledBase, originalIndex++, channel.Writer, uiBatch);
+                        }
+                        else if (Directory.Exists(path))
+                        {
+                            var opts = new EnumerationOptions
+                            {
+                                IgnoreInaccessible = true,
+                                RecurseSubdirectories = true,
+                                AttributesToSkip = FileAttributes.ReparsePoint | FileAttributes.Hidden | FileAttributes.System
+                            };
+                            try
+                            {
+                                foreach (string file in Directory.EnumerateFiles(path, "*", opts))
                                 {
-                                    PinItemToTop(data);
-                                    data.Status = "0%";
-                                    progress = new Progress<double>(p =>
+                                    if (_cts.Token.IsCancellationRequested) break;
+                                    await ProcessFileEntry(file, pooledBase, originalIndex++, channel.Writer, uiBatch);
+
+                                    if (uiBatch.Count >= 2000 || (DateTime.UtcNow.Ticks - lastBatchTime > 2500000))
                                     {
-                                        int pct = (int)p;
-                                        if (data.Status != $"{pct}%") { data.Status = $"{pct}%"; lvFiles.Invalidate(); }
-                                    });
+                                        FlushUiBatch();
+                                    }
                                 }
                             }
                             catch { }
-
-                            string hash = await HashHelper.ComputeHashAsync(data.FullPath, _currentHashType, progress, _cts.Token);
-                            sw.Stop();
-
-                            if (data.IsPinned) UnpinAndRestore(data);
-
-                            if (hash == "CANCELLED") return;
-
-                            data.CalculatedHash = hash;
-                            if (_settings.ShowTimeTab) data.TimeStr = $"{sw.ElapsedMilliseconds} ms";
-
-                            if (hash == "FILE_NOT_FOUND" || hash == "ACCESS_DENIED" || hash == "ERROR")
-                            {
-                                data.Status = hash;
-                                data.ForeColor = ColRedText;
-                                data.BackColor = ColRedBack;
-                                Interlocked.Increment(ref errorCount);
-                            }
-                            else
-                            {
-                                data.Status = "Done";
-                                data.ForeColor = ColGreenText;
-                                data.BackColor = ColGreenBack;
-                                Interlocked.Increment(ref okCount);
-                            }
-
-                            int currentCompleted = Interlocked.Increment(ref completed);
-                            ThrottledUiUpdate(currentCompleted, processingList.Count, okCount, 0, errorCount);
                         }
-                        catch (OperationCanceledException) { }
-                        finally { semaphore.Release(); }
-                    });
+                    }
 
-                    await Task.WhenAll(tasks);
+                    FlushUiBatch();
                 }
-            }
-            catch (OperationCanceledException) { MessageBox.Show("Operation Stopped."); }
+                finally
+                {
+                    channel.Writer.Complete();
+                }
+            });
 
+            // --- CONSUMER TASKS ---
+            var consumers = new Task[consumerCount];
+            for (int i = 0; i < consumerCount; i++)
+            {
+                consumers[i] = Task.Run(async () =>
+                {
+                    byte[] sharedBuffer = ArrayPool<byte>.Shared.Rent(1024 * 1024);
+                    HashAlgorithm? reusedAlgo = null;
+
+                    try
+                    {
+                        if (_currentHashType == HashType.MD5) reusedAlgo = MD5.Create();
+                        else if (_currentHashType == HashType.SHA1) reusedAlgo = SHA1.Create();
+                        else if (_currentHashType == HashType.SHA256) reusedAlgo = SHA256.Create();
+
+                        while (await channel.Reader.WaitToReadAsync())
+                        {
+                            while (channel.Reader.TryRead(out FileJob job))
+                            {
+                                if (_cts.Token.IsCancellationRequested) return;
+
+                                Stopwatch sw = Stopwatch.StartNew();
+                                byte[]? hashBytes = null;
+                                ItemStatus status = ItemStatus.Pending;
+
+                                try
+                                {
+                                    // IO OPTIMIZATION: Zero-Allocation Handle Open
+                                    using (Microsoft.Win32.SafeHandles.SafeFileHandle handle = File.OpenHandle(
+                                        job.FullPath,
+                                        FileMode.Open,
+                                        FileAccess.Read,
+                                        FileShare.Read,
+                                        FileOptions.SequentialScan))
+                                    {
+                                        long len = RandomAccess.GetLength(handle);
+                                        bool isLarge = len > LargeFileThreshold;
+
+                                        if (isLarge)
+                                        {
+                                            // Fallback to Stream wrapper for progress reporting on large files
+                                            using (var fs = new FileStream(handle, FileAccess.Read))
+                                            {
+                                                AddActiveJob(job.Index, Path.GetFileName(job.FullPath));
+                                                var progress = new Progress<double>(p => UpdateActiveJob(job.Index, p));
+                                                var streamToHash = new ProgressStream(fs, progress, len);
+
+                                                hashBytes = HashHelper.ComputeHashSync(streamToHash, _currentHashType, sharedBuffer, reusedAlgo);
+
+                                                RemoveActiveJob(job.Index);
+                                            }
+                                        }
+                                        else
+                                        {
+                                            // PURE FAST PATH: RandomAccess -> Buffer -> Hash
+                                            hashBytes = HashHelper.ComputeHashHandle(handle, _currentHashType, sharedBuffer, reusedAlgo);
+                                        }
+                                    }
+                                }
+                                catch (OperationCanceledException) { return; }
+                                catch (Exception)
+                                {
+                                    status = ItemStatus.Error;
+                                }
+
+                                sw.Stop();
+
+                                string timeStr = _settings.ShowTimeTab ? $"{sw.ElapsedMilliseconds} ms" : "";
+
+                                if (hashBytes == null || status == ItemStatus.Error)
+                                {
+                                    status = ItemStatus.Error;
+                                    Interlocked.Increment(ref errorCount);
+                                }
+                                else
+                                {
+                                    status = ItemStatus.OK;
+                                    Interlocked.Increment(ref okCount);
+                                }
+
+                                // SoA Update
+                                _fileStore.SetResult(job.Index, hashBytes, timeStr, status);
+
+                                int currentCompleted = Interlocked.Increment(ref completed);
+                                ThrottledUiUpdate(currentCompleted, -1, okCount, 0, errorCount);
+                            }
+                        }
+                    }
+                    finally
+                    {
+                        ArrayPool<byte>.Shared.Return(sharedBuffer);
+                        reusedAlgo?.Dispose();
+                    }
+                });
+            }
+
+            await Task.WhenAll(consumers);
+            await producer;
+
+            GCSettings.LatencyMode = oldMode;
             globalSw.Stop();
             HandleCompletion(completed, okCount, 0, errorCount, globalSw);
         }
@@ -190,6 +238,10 @@ namespace SharpSFV
         {
             SetProcessingState(true);
             _cts = new CancellationTokenSource();
+
+            GCLatencyMode oldMode = GCSettings.LatencyMode;
+            GCSettings.LatencyMode = GCLatencyMode.SustainedLowLatency;
+
             SetupUIForMode("Verification");
 
             string baseFolder = Path.GetDirectoryName(checkFilePath) ?? "";
@@ -204,304 +256,199 @@ namespace SharpSFV
 
             SetAlgorithm(verificationAlgo);
 
-            var parsedLines = new List<(string ExpectedHash, string Filename)>();
+            var parsedLines = new List<(byte[] ExpectedHash, string Filename)>();
             try
             {
                 foreach (var line in await File.ReadAllLinesAsync(checkFilePath))
                 {
                     if (string.IsNullOrWhiteSpace(line) || line.TrimStart().StartsWith(";")) continue;
 
-                    string expectedHash = "", filename = "";
+                    string expectedHashStr = "", filename = "";
                     Match matchA = Regex.Match(line, @"^\s*([0-9a-fA-F]+)\s+\*?(.*?)\s*$");
                     Match matchB = Regex.Match(line, @"^\s*(.*?)\s+([0-9a-fA-F]{8})\s*$");
 
-                    if (verificationAlgo == HashType.Crc32 && matchB.Success)
-                    {
-                        filename = matchB.Groups[1].Value.Trim();
-                        expectedHash = matchB.Groups[2].Value;
-                    }
-                    else if (matchA.Success)
-                    {
-                        expectedHash = matchA.Groups[1].Value.Trim();
-                        filename = matchA.Groups[2].Value.Trim();
-                    }
+                    if (verificationAlgo == HashType.Crc32 && matchB.Success) { filename = matchB.Groups[1].Value.Trim(); expectedHashStr = matchB.Groups[2].Value; }
+                    else if (matchA.Success) { expectedHashStr = matchA.Groups[1].Value.Trim(); filename = matchA.Groups[2].Value.Trim(); }
 
-                    if (!string.IsNullOrEmpty(expectedHash) && !string.IsNullOrEmpty(filename))
-                        parsedLines.Add((expectedHash, filename));
+                    if (!string.IsNullOrEmpty(expectedHashStr))
+                    {
+                        try { parsedLines.Add((Convert.FromHexString(expectedHashStr), filename)); } catch { }
+                    }
                 }
             }
             catch (Exception ex) { MessageBox.Show("Error parsing: " + ex.Message); SetProcessingState(false); return; }
 
-            _allItems.Clear();
-            _displayList.Clear();
-            int missingCount = 0;
+            _fileStore.Clear();
+            _displayIndices.Clear();
 
+            int missingCount = 0;
+            int loadIndex = 0;
+
+            string pooledBase = StringPool.GetOrAdd(baseFolder);
+
+            // Populate Store
             foreach (var entry in parsedLines)
             {
                 string fullPath = Path.GetFullPath(Path.Combine(baseFolder, entry.Filename));
                 bool exists = File.Exists(fullPath);
 
-                var data = new FileItemData
-                {
-                    FullPath = fullPath,
-                    FileName = entry.Filename,
-                    RelativePath = entry.Filename,
-                    BaseDirectory = baseFolder,
-                    ExpectedHash = entry.ExpectedHash,
-                    CalculatedHash = "Waiting...",
-                    Status = exists ? "Pending" : "MISSING"
-                };
+                string pooledName = StringPool.GetOrAdd(Path.GetFileName(entry.Filename));
+                string pooledRel = StringPool.GetOrAdd(entry.Filename);
 
-                if (!exists)
-                {
-                    data.ForeColor = ColYellowText;
-                    data.BackColor = ColYellowBack;
-                    data.FontStyle = FontStyle.Strikeout;
-                    missingCount++;
-                }
-                _allItems.Add(data);
+                ItemStatus initialStatus = exists ? ItemStatus.Pending : ItemStatus.Missing;
+                if (!exists) missingCount++;
+
+                int idx = _fileStore.Add(pooledName, pooledRel, pooledBase, loadIndex++, initialStatus, entry.ExpectedHash);
+                _displayIndices.Add(idx);
             }
 
-            _allItems.Sort((a, b) => string.Compare(a.FullPath, b.FullPath, StringComparison.OrdinalIgnoreCase));
-            for (int i = 0; i < _allItems.Count; i++) _allItems[i].OriginalIndex = i;
+            // In verification, we usually want alphabetical sort initially
+            // Simple sort by Name using the Store
+            _displayIndices.Sort((a, b) => string.Compare(_fileStore.GetFullPath(a), _fileStore.GetFullPath(b), StringComparison.OrdinalIgnoreCase));
 
-            _displayList.AddRange(_allItems);
+            // Re-assign original indices based on sort if needed, or just keep them
             UpdateDisplayList();
-            UpdateStats(0, _allItems.Count, 0, 0, missingCount);
-            progressBarTotal.Maximum = _allItems.Count;
-            progressBarTotal.Value = 0;
+
+            UpdateStats(0, _fileStore.Count, 0, 0, missingCount);
+            progressBarTotal.Maximum = _fileStore.Count;
 
             int completed = 0, okCount = 0, badCount = 0;
 
-            int maxThreads = Environment.ProcessorCount;
-            string driveMode = "SSD Mode";
-
-            if (_settings.OptimizeForHDD)
+            bool isHDD = _settings.OptimizeForHDD;
+            // Check first existing file for drive type
+            string? testFile = null;
+            for (int i = 0; i < _fileStore.Count; i++)
             {
-                maxThreads = 1;
-                driveMode = "HDD Mode (Forced)";
+                string p = _fileStore.GetFullPath(i);
+                if (File.Exists(p)) { testFile = p; break; }
             }
-            else
-            {
-                var firstFile = _displayList.FirstOrDefault(x => File.Exists(x.FullPath));
-                if (firstFile != null && DriveDetector.IsRotational(firstFile.FullPath))
-                {
-                    maxThreads = 1;
-                    driveMode = "HDD Mode (Detected)";
-                }
-            }
+            if (!isHDD && testFile != null) isHDD = DriveDetector.IsRotational(testFile);
 
-            this.Text = $"SharpSFV - Verifying... [{driveMode}]";
+            int consumerCount = isHDD ? 1 : Environment.ProcessorCount;
+            this.Text = $"SharpSFV - Verifying... [{(isHDD ? "HDD/Seq" : "SSD/Par")}]";
+
             Stopwatch globalSw = Stopwatch.StartNew();
+            var channel = Channel.CreateBounded<FileJob>(50000);
 
-            try
+            var producer = Task.Run(async () =>
             {
-                using (var semaphore = new SemaphoreSlim(maxThreads))
+                try
                 {
-                    var processingList = _displayList.ToList();
-                    var tasks = processingList.Select(async data =>
+                    foreach (int idx in _displayIndices)
                     {
-                        if (data.Status == "MISSING") return;
-                        if (_cts.Token.IsCancellationRequested) return;
+                        if (_cts.Token.IsCancellationRequested) break;
+                        if (_fileStore.Statuses[idx] == ItemStatus.Missing) continue;
 
-                        await semaphore.WaitAsync(_cts.Token);
-                        try
-                        {
-                            Stopwatch sw = Stopwatch.StartNew();
-                            IProgress<double>? progress = null;
+                        string fullPath = _fileStore.GetFullPath(idx);
+                        byte[]? expected = _fileStore.ExpectedHashes[idx];
 
-                            try
-                            {
-                                if (new FileInfo(data.FullPath).Length > LargeFileThreshold)
-                                {
-                                    PinItemToTop(data);
-                                    data.Status = "0%";
-                                    progress = new Progress<double>(p =>
-                                    {
-                                        int pct = (int)p;
-                                        if (data.Status != $"{pct}%") { data.Status = $"{pct}%"; lvFiles.Invalidate(); }
-                                    });
-                                }
-                            }
-                            catch { }
-
-                            string calculatedHash = await HashHelper.ComputeHashAsync(data.FullPath, verificationAlgo, progress, _cts.Token);
-                            sw.Stop();
-
-                            if (data.IsPinned) UnpinAndRestore(data);
-                            if (calculatedHash == "CANCELLED") return;
-
-                            data.CalculatedHash = calculatedHash;
-                            if (_settings.ShowTimeTab) data.TimeStr = $"{sw.ElapsedMilliseconds} ms";
-
-                            bool isMatch = false;
-
-                            if (calculatedHash == "FILE_NOT_FOUND" || calculatedHash == "ACCESS_DENIED" || calculatedHash == "ERROR")
-                            {
-                                // Error Status
-                            }
-                            else
-                            {
-                                if (calculatedHash.Equals(data.ExpectedHash, StringComparison.OrdinalIgnoreCase))
-                                {
-                                    isMatch = true;
-                                }
-                                else if (verificationAlgo == HashType.Crc32)
-                                {
-                                    string reversed = ReverseHexBytes(calculatedHash);
-                                    if (reversed.Equals(data.ExpectedHash, StringComparison.OrdinalIgnoreCase))
-                                        isMatch = true;
-                                }
-                            }
-
-                            if (isMatch)
-                            {
-                                data.Status = "OK";
-                                data.ForeColor = ColGreenText;
-                                data.BackColor = ColGreenBack;
-                                Interlocked.Increment(ref okCount);
-                            }
-                            else if (calculatedHash.Length > 20)
-                            {
-                                data.Status = calculatedHash;
-                                data.ForeColor = ColYellowText;
-                                data.BackColor = ColYellowBack;
-                                Interlocked.Increment(ref badCount);
-                            }
-                            else
-                            {
-                                data.Status = "BAD";
-                                data.ForeColor = ColRedText;
-                                data.BackColor = ColRedBack;
-                                Interlocked.Increment(ref badCount);
-                            }
-
-                            int currentCompleted = Interlocked.Increment(ref completed);
-                            ThrottledUiUpdate(currentCompleted, processingList.Count, okCount, badCount, missingCount);
-                        }
-                        catch (OperationCanceledException) { }
-                        finally { semaphore.Release(); }
-                    });
-
-                    await Task.WhenAll(tasks);
-                }
-            }
-            catch (OperationCanceledException) { MessageBox.Show("Operation Stopped."); }
-
-            globalSw.Stop();
-            HandleCompletion(completed, okCount, badCount, missingCount, globalSw, true);
-        }
-
-        private void HandleCompletion(int completed, int ok, int bad, int missing, Stopwatch sw, bool verifyMode = false)
-        {
-            // FIX: Safely check for cancellation to resolve CS8602
-            bool isCancelled = _cts?.Token.IsCancellationRequested ?? false;
-
-            if (!isCancelled)
-            {
-                // Play success or error sound based on results
-                // Logic: Error sound if any files were BAD, or if verifying and files are MISSING
-                if (bad > 0 || (missing > 0 && verifyMode))
-                    SystemSounds.Exclamation.Play();
-                else
-                    SystemSounds.Asterisk.Play();
-            }
-
-            SetProcessingState(false);
-            UpdateStats(completed, _allItems.Count, ok, bad, missing);
-            progressBarTotal.Value = completed;
-
-            if (verifyMode)
-            {
-                string algoName = Enum.GetName(typeof(HashType), _currentHashType) ?? "Hash";
-                this.Text = (bad == 0 && missing == 0)
-                    ? $"SharpSFV [{algoName}] - All Files OK"
-                    : $"SharpSFV [{algoName}] - {bad} Bad, {missing} Missing";
-            }
-            else
-            {
-                this.Text = $"SharpSFV - Creation Complete [{_currentHashType}]";
-            }
-
-            // Summary Row
-            if (_settings.ShowTimeTab && !isCancelled)
-            {
-                var summaryItem = new FileItemData
-                {
-                    FileName = "TOTAL ELAPSED TIME",
-                    CalculatedHash = "",
-                    Status = "",
-                    ExpectedHash = "",
-                    TimeStr = $"{sw.ElapsedMilliseconds} ms",
-                    IsSummaryRow = true,
-                    OriginalIndex = int.MaxValue,
-                    ForeColor = Color.Blue,
-                    FontStyle = FontStyle.Bold
-                };
-                _allItems.Add(summaryItem);
-                _displayList.Add(summaryItem);
-                UpdateDisplayList();
-            }
-            else
-            {
-                lvFiles.Invalidate();
-            }
-        }
-
-        private void SetProcessingState(bool processing)
-        {
-            _isProcessing = processing;
-            if (_btnStop != null) _btnStop.Enabled = processing;
-        }
-
-        private void PinItemToTop(FileItemData data)
-        {
-            if (this.InvokeRequired) { this.Invoke(new Action(() => PinItemToTop(data))); return; }
-            data.IsPinned = true;
-            _displayList.Remove(data);
-            _displayList.Insert(0, data);
-            lvFiles.Invalidate();
-        }
-
-        private void UnpinAndRestore(FileItemData data)
-        {
-            if (this.InvokeRequired) { this.Invoke(new Action(() => UnpinAndRestore(data))); return; }
-            data.IsPinned = false;
-            _displayList.Sort(_listSorter);
-            lvFiles.Invalidate();
-        }
-
-        private string ReverseHexBytes(string hex)
-        {
-            if (hex.Length % 2 != 0) return hex;
-            char[] charArray = new char[hex.Length];
-            for (int i = 0; i < hex.Length; i += 2)
-            {
-                charArray[i] = hex[hex.Length - i - 2];
-                charArray[i + 1] = hex[hex.Length - i - 1];
-            }
-            return new string(charArray);
-        }
-
-        private void ThrottledUiUpdate(int current, int total, int ok, int bad, int missing)
-        {
-            long now = DateTime.Now.Ticks;
-            if (now - Interlocked.Read(ref _lastUiUpdateTick) > 1000000)
-            {
-                lock (_uiLock)
-                {
-                    if (now - _lastUiUpdateTick > 1000000)
-                    {
-                        _lastUiUpdateTick = now;
-                        this.Invoke(new Action(() =>
-                        {
-                            progressBarTotal.Value = Math.Min(current, progressBarTotal.Maximum);
-                            UpdateStats(current, total, ok, bad, missing);
-                            lvFiles.Invalidate();
-                        }));
+                        await channel.Writer.WriteAsync(new FileJob(idx, fullPath, expected), _cts.Token);
                     }
                 }
+                finally { channel.Writer.Complete(); }
+            });
+
+            var consumers = new Task[consumerCount];
+            for (int i = 0; i < consumerCount; i++)
+            {
+                consumers[i] = Task.Run(async () =>
+                {
+                    byte[] sharedBuffer = ArrayPool<byte>.Shared.Rent(1024 * 1024);
+                    HashAlgorithm? reusedAlgo = null;
+
+                    try
+                    {
+                        if (verificationAlgo == HashType.MD5) reusedAlgo = MD5.Create();
+                        else if (verificationAlgo == HashType.SHA1) reusedAlgo = SHA1.Create();
+                        else if (verificationAlgo == HashType.SHA256) reusedAlgo = SHA256.Create();
+
+                        while (await channel.Reader.WaitToReadAsync())
+                        {
+                            while (channel.Reader.TryRead(out FileJob job))
+                            {
+                                if (_cts.Token.IsCancellationRequested) return;
+
+                                Stopwatch sw = Stopwatch.StartNew();
+                                byte[]? calculatedHash = null;
+
+                                try
+                                {
+                                    using (Microsoft.Win32.SafeHandles.SafeFileHandle handle = File.OpenHandle(
+                                        job.FullPath,
+                                        FileMode.Open,
+                                        FileAccess.Read,
+                                        FileShare.Read,
+                                        FileOptions.SequentialScan))
+                                    {
+                                        long len = RandomAccess.GetLength(handle);
+                                        bool isLarge = len > LargeFileThreshold;
+
+                                        if (isLarge)
+                                        {
+                                            using (var fs = new FileStream(handle, FileAccess.Read))
+                                            {
+                                                AddActiveJob(job.Index, Path.GetFileName(job.FullPath));
+                                                var progress = new Progress<double>(p => UpdateActiveJob(job.Index, p));
+                                                var streamToHash = new ProgressStream(fs, progress, len);
+                                                calculatedHash = HashHelper.ComputeHashSync(streamToHash, verificationAlgo, sharedBuffer, reusedAlgo);
+                                                RemoveActiveJob(job.Index);
+                                            }
+                                        }
+                                        else
+                                        {
+                                            calculatedHash = HashHelper.ComputeHashHandle(handle, verificationAlgo, sharedBuffer, reusedAlgo);
+                                        }
+                                    }
+                                }
+                                catch (OperationCanceledException) { return; }
+                                catch { }
+
+                                sw.Stop();
+
+                                string timeStr = _settings.ShowTimeTab ? $"{sw.ElapsedMilliseconds} ms" : "";
+
+                                bool isMatch = false;
+                                if (calculatedHash != null && job.ExpectedHash != null)
+                                {
+                                    if (calculatedHash.SequenceEqual(job.ExpectedHash)) isMatch = true;
+                                }
+
+                                ItemStatus status;
+                                if (isMatch)
+                                {
+                                    status = ItemStatus.OK;
+                                    Interlocked.Increment(ref okCount);
+                                }
+                                else if (calculatedHash == null)
+                                {
+                                    status = ItemStatus.Error;
+                                    Interlocked.Increment(ref badCount);
+                                }
+                                else
+                                {
+                                    status = ItemStatus.Bad;
+                                    Interlocked.Increment(ref badCount);
+                                }
+
+                                _fileStore.SetResult(job.Index, calculatedHash, timeStr, status);
+
+                                int currentCompleted = Interlocked.Increment(ref completed);
+                                ThrottledUiUpdate(currentCompleted, -1, okCount, badCount, missingCount);
+                            }
+                        }
+                    }
+                    finally
+                    {
+                        ArrayPool<byte>.Shared.Return(sharedBuffer);
+                        reusedAlgo?.Dispose();
+                    }
+                });
             }
+
+            await Task.WhenAll(consumers);
+            GCSettings.LatencyMode = oldMode;
+            globalSw.Stop();
+            HandleCompletion(completed, okCount, badCount, missingCount, globalSw, true);
         }
     }
 }

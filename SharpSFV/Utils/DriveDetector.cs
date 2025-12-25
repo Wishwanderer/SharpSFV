@@ -2,85 +2,14 @@
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Text;
-using System.Linq;
 using Microsoft.Win32.SafeHandles;
 using Microsoft.Win32;
+using SharpSFV.Interop;
 
-namespace SharpSFV
+namespace SharpSFV.Utils
 {
     public static class DriveDetector
     {
-        // P/Invoke Constants
-        private const uint GENERIC_READ = 0x80000000;
-        private const uint FILE_SHARE_READ = 0x00000001;
-        private const uint FILE_SHARE_WRITE = 0x00000002;
-        private const uint OPEN_EXISTING = 3;
-
-        // IOCTL Codes
-        private const uint IOCTL_STORAGE_QUERY_PROPERTY = 0x002D1400;
-        private const uint IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS = 0x00560000;
-
-        // Property IDs
-        private const int StorageDeviceProperty = 0;
-        private const int StorageDeviceSeekPenaltyProperty = 7;
-        private const int PropertyStandardQuery = 0;
-
-        [StructLayout(LayoutKind.Sequential)]
-        private struct STORAGE_PROPERTY_QUERY
-        {
-            public uint PropertyId;
-            public uint QueryType;
-            public byte AdditionalParameters;
-        }
-
-        [StructLayout(LayoutKind.Sequential)]
-        private struct DISK_EXTENT
-        {
-            public int DiskNumber;
-            public long StartingOffset;
-            public long ExtentLength;
-        }
-
-        [StructLayout(LayoutKind.Sequential)]
-        private struct VOLUME_DISK_EXTENTS
-        {
-            public int NumberOfDiskExtents;
-            [MarshalAs(UnmanagedType.ByValArray, SizeConst = 1)]
-            public DISK_EXTENT[] Extents;
-        }
-
-        [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Auto)]
-        private static extern SafeFileHandle CreateFile(
-            string lpFileName,
-            uint dwDesiredAccess,
-            uint dwShareMode,
-            IntPtr lpSecurityAttributes,
-            uint dwCreationDisposition,
-            uint dwFlagsAndAttributes,
-            IntPtr hTemplateFile);
-
-        [DllImport("kernel32.dll", SetLastError = true)]
-        private static extern bool DeviceIoControl(
-            SafeFileHandle hDevice,
-            uint dwIoControlCode,
-            ref STORAGE_PROPERTY_QUERY lpInBuffer,
-            uint nInBufferSize,
-            IntPtr lpOutBuffer,
-            uint nOutBufferSize,
-            out uint lpBytesReturned,
-            IntPtr lpOverlapped);
-
-        [DllImport("kernel32.dll", SetLastError = true)]
-        private static extern bool DeviceIoControl(
-            SafeFileHandle hDevice,
-            uint dwIoControlCode,
-            IntPtr lpInBuffer,
-            uint nInBufferSize,
-            IntPtr lpOutBuffer,
-            uint nOutBufferSize,
-            out uint lpBytesReturned,
-            IntPtr lpOverlapped);
-
         /// <summary>
         /// Determines if the drive is a mechanical HDD.
         /// Returns TRUE for HDD/Network (Sequential preferred).
@@ -103,7 +32,9 @@ namespace SharpSFV
 
                 string volume = $"\\\\.\\{driveRoot.TrimEnd('\\')}";
 
-                using (SafeFileHandle hDevice = CreateFile(volume, 0, FILE_SHARE_READ | FILE_SHARE_WRITE, IntPtr.Zero, OPEN_EXISTING, 0, IntPtr.Zero))
+                using (SafeFileHandle hDevice = Win32Storage.CreateFile(volume, 0,
+                    Win32Storage.FILE_SHARE_READ | Win32Storage.FILE_SHARE_WRITE,
+                    IntPtr.Zero, Win32Storage.OPEN_EXISTING, 0, IntPtr.Zero))
                 {
                     if (hDevice.IsInvalid) return true; // Default to HDD on error
 
@@ -118,7 +49,9 @@ namespace SharpSFV
                     {
                         // 4. Try opening Physical Drive (Requires Admin)
                         string physicalPath = $"\\\\.\\PhysicalDrive{diskNumber}";
-                        using (SafeFileHandle hPhysical = CreateFile(physicalPath, 0, FILE_SHARE_READ | FILE_SHARE_WRITE, IntPtr.Zero, OPEN_EXISTING, 0, IntPtr.Zero))
+                        using (SafeFileHandle hPhysical = Win32Storage.CreateFile(physicalPath, 0,
+                            Win32Storage.FILE_SHARE_READ | Win32Storage.FILE_SHARE_WRITE,
+                            IntPtr.Zero, Win32Storage.OPEN_EXISTING, 0, IntPtr.Zero))
                         {
                             if (!hPhysical.IsInvalid)
                             {
@@ -129,7 +62,6 @@ namespace SharpSFV
                         }
 
                         // 5. Registry String Heuristics (Robust Fallback)
-                        // If hardware flags failed or reported 0 (Unknown), check the Model Name.
                         string friendlyName = GetFriendlyNameFromRegistry(diskNumber);
                         if (!string.IsNullOrEmpty(friendlyName))
                         {
@@ -150,17 +82,24 @@ namespace SharpSFV
             if (n.Contains("NVME")) return true;
             if (n.Contains("FLASH")) return true;
             if (n.Contains("M.2")) return true;
+            if (n.Contains("Samsung")) return true;
             return false;
         }
 
         private static int GetRotationRate(SafeFileHandle hDevice)
         {
-            var query = new STORAGE_PROPERTY_QUERY { PropertyId = StorageDeviceProperty, QueryType = PropertyStandardQuery };
+            var query = new Win32Storage.STORAGE_PROPERTY_QUERY
+            {
+                PropertyId = Win32Storage.StorageDeviceProperty,
+                QueryType = Win32Storage.PropertyStandardQuery
+            };
+
             uint bytesReturned;
             IntPtr buffer = Marshal.AllocHGlobal(1024);
             try
             {
-                if (DeviceIoControl(hDevice, IOCTL_STORAGE_QUERY_PROPERTY, ref query, (uint)Marshal.SizeOf(query), buffer, 1024, out bytesReturned, IntPtr.Zero))
+                if (Win32Storage.DeviceIoControl(hDevice, Win32Storage.IOCTL_STORAGE_QUERY_PROPERTY,
+                    ref query, (uint)Marshal.SizeOf(query), buffer, 1024, out bytesReturned, IntPtr.Zero))
                 {
                     if (bytesReturned >= 40) return Marshal.ReadInt32(buffer, 36);
                 }
@@ -171,12 +110,18 @@ namespace SharpSFV
 
         private static int GetSeekPenalty(SafeFileHandle hDevice)
         {
-            var query = new STORAGE_PROPERTY_QUERY { PropertyId = StorageDeviceSeekPenaltyProperty, QueryType = PropertyStandardQuery };
+            var query = new Win32Storage.STORAGE_PROPERTY_QUERY
+            {
+                PropertyId = Win32Storage.StorageDeviceSeekPenaltyProperty,
+                QueryType = Win32Storage.PropertyStandardQuery
+            };
+
             uint bytesReturned;
             IntPtr buffer = Marshal.AllocHGlobal(12);
             try
             {
-                if (DeviceIoControl(hDevice, IOCTL_STORAGE_QUERY_PROPERTY, ref query, (uint)Marshal.SizeOf(query), buffer, 12, out bytesReturned, IntPtr.Zero))
+                if (Win32Storage.DeviceIoControl(hDevice, Win32Storage.IOCTL_STORAGE_QUERY_PROPERTY,
+                    ref query, (uint)Marshal.SizeOf(query), buffer, 12, out bytesReturned, IntPtr.Zero))
                 {
                     return Marshal.ReadByte(buffer, 8) != 0 ? 1 : 0;
                 }
@@ -187,15 +132,15 @@ namespace SharpSFV
 
         private static int GetPhysicalDriveNumber(SafeFileHandle hDevice)
         {
-            int size = Marshal.SizeOf(typeof(VOLUME_DISK_EXTENTS));
+            int size = Marshal.SizeOf(typeof(Win32Storage.VOLUME_DISK_EXTENTS));
             IntPtr ptr = Marshal.AllocHGlobal(size);
             uint bytesReturned;
             try
             {
-                // IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS
-                if (DeviceIoControl(hDevice, IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS, IntPtr.Zero, 0, ptr, (uint)size, out bytesReturned, IntPtr.Zero))
+                if (Win32Storage.DeviceIoControl(hDevice, Win32Storage.IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS,
+                    IntPtr.Zero, 0, ptr, (uint)size, out bytesReturned, IntPtr.Zero))
                 {
-                    var extents = Marshal.PtrToStructure<VOLUME_DISK_EXTENTS>(ptr);
+                    var extents = Marshal.PtrToStructure<Win32Storage.VOLUME_DISK_EXTENTS>(ptr);
                     if (extents.NumberOfDiskExtents > 0) return extents.Extents[0].DiskNumber;
                 }
             }
@@ -207,7 +152,6 @@ namespace SharpSFV
         {
             try
             {
-                // 1. Get PnP Device ID from the Disk Service Enum
                 using (var keyEnum = Registry.LocalMachine.OpenSubKey(@"SYSTEM\CurrentControlSet\Services\disk\Enum"))
                 {
                     if (keyEnum == null) return "";
@@ -215,7 +159,6 @@ namespace SharpSFV
 
                     if (!string.IsNullOrEmpty(deviceId))
                     {
-                        // 2. Get FriendlyName from the Device Enum
                         using (var keyDevice = Registry.LocalMachine.OpenSubKey($@"SYSTEM\CurrentControlSet\Enum\{deviceId}"))
                         {
                             if (keyDevice != null)
@@ -246,7 +189,9 @@ namespace SharpSFV
                 string volume = $"\\\\.\\{driveRoot.TrimEnd('\\')}";
                 sb.AppendLine($"Volume: {volume}");
 
-                using (SafeFileHandle hDevice = CreateFile(volume, 0, FILE_SHARE_READ | FILE_SHARE_WRITE, IntPtr.Zero, OPEN_EXISTING, 0, IntPtr.Zero))
+                using (SafeFileHandle hDevice = Win32Storage.CreateFile(volume, 0,
+                    Win32Storage.FILE_SHARE_READ | Win32Storage.FILE_SHARE_WRITE,
+                    IntPtr.Zero, Win32Storage.OPEN_EXISTING, 0, IntPtr.Zero))
                 {
                     if (hDevice.IsInvalid)
                     {
@@ -267,7 +212,9 @@ namespace SharpSFV
 
                         // Physical Handle Check
                         string physPath = $"\\\\.\\PhysicalDrive{diskNum}";
-                        using (SafeFileHandle hPhysical = CreateFile(physPath, 0, FILE_SHARE_READ | FILE_SHARE_WRITE, IntPtr.Zero, OPEN_EXISTING, 0, IntPtr.Zero))
+                        using (SafeFileHandle hPhysical = Win32Storage.CreateFile(physPath, 0,
+                            Win32Storage.FILE_SHARE_READ | Win32Storage.FILE_SHARE_WRITE,
+                            IntPtr.Zero, Win32Storage.OPEN_EXISTING, 0, IntPtr.Zero))
                         {
                             if (!hPhysical.IsInvalid)
                             {
