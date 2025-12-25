@@ -468,7 +468,7 @@ namespace SharpSFV
 
             Label lbl = new Label
             {
-                Text = "SharpSFV v2.70\nInspired by QuickSFV\n\nCreated by L33T.",
+                Text = "SharpSFV v2.40\nInspired by QuickSFV\n\nCreated by L33T.",
                 AutoSize = false,
                 TextAlign = ContentAlignment.MiddleCenter,
                 Dock = DockStyle.Top,
