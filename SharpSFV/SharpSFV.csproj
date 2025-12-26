@@ -17,10 +17,14 @@
 		<ClientOnly>false</ClientOnly>
 		<GarbageCollectionAdaptationMode>1</GarbageCollectionAdaptationMode>
 		<AssemblyName>SharpSFV</AssemblyName>
-		<RootNamespace>SharpSFV</RootNamespace>
-		<FileVersion>2.7.0.0</FileVersion>
-		<AssemblyVersion>2.7.0.0</AssemblyVersion>
-		<Description>High-performance SFV/Checksum utility.</Description>
+		<AssemblyVersion>2.4.0.0</AssemblyVersion>
+		<FileVersion>2.4.0.0</FileVersion>
+		<Version>2.4.0</Version>
+		<Authors>L33T</Authors>
+		<Company>L33T Labs</Company>
+		<Product>SharpSFV</Product>
+		<Copyright>Copyright © 2025 L33T</Copyright>
+		<Description>High-performance zero-allocation checksum utility.</Description>
 	</PropertyGroup>
 
 	<ItemGroup>
@@ -32,4 +36,3 @@
 	</ItemGroup>
 
 </Project>
-
