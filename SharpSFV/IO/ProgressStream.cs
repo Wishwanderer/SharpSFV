@@ -12,9 +12,11 @@ namespace SharpSFV
         private readonly long _totalLength;
         private long _bytesRead;
 
-        // OPTIMIZATION: Integer math for reporting thresholds
-        private readonly long _bytesPerPercent;
+        // Optimization: Throttling
+        private readonly long _bytesPerStep; // 0.1% resolution
         private long _bytesSinceLastReport;
+        private long _lastReportTick;
+        private const int ReportIntervalMs = 100; // Cap updates to 10fps
 
         public ProgressStream(Stream innerStream, IProgress<double> progress, long length)
         {
@@ -22,9 +24,11 @@ namespace SharpSFV
             _progress = progress;
             _totalLength = length;
 
-            // Report every 1% or 1MB, whichever is larger, to avoid event spam on fast SSDs
-            _bytesPerPercent = _totalLength / 100;
-            if (_bytesPerPercent == 0) _bytesPerPercent = 1024 * 1024;
+            // Target 0.1% resolution (1000 steps)
+            _bytesPerStep = _totalLength / 1000;
+            if (_bytesPerStep == 0) _bytesPerStep = 64 * 1024; // Min reporting chunk 64KB
+
+            _lastReportTick = Environment.TickCount64;
         }
 
         public override int Read(byte[] buffer, int offset, int count)
@@ -54,12 +58,19 @@ namespace SharpSFV
             _bytesRead += read;
             _bytesSinceLastReport += read;
 
-            // OPTIMIZATION: Only calc double division when we cross the threshold
-            if (_bytesSinceLastReport >= _bytesPerPercent)
+            // 1. Check if we have processed enough data for a 0.1% increment
+            if (_bytesSinceLastReport >= _bytesPerStep)
             {
-                _bytesSinceLastReport = 0;
-                double percent = (double)_bytesRead / _totalLength * 100.0;
-                _progress.Report(percent);
+                // 2. Check if enough time has passed (Throttling)
+                long now = Environment.TickCount64;
+                if ((now - _lastReportTick) >= ReportIntervalMs)
+                {
+                    _bytesSinceLastReport = 0;
+                    _lastReportTick = now;
+
+                    double percent = (double)_bytesRead / _totalLength * 100.0;
+                    _progress.Report(percent);
+                }
             }
         }
 

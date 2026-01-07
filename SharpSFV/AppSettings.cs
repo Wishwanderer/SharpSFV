@@ -2,7 +2,6 @@ using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.IO;
-using System.Linq;
 using System.Windows.Forms;
 
 namespace SharpSFV
@@ -13,10 +12,17 @@ namespace SharpSFV
 
         // Existing
         public bool ShowTimeTab { get; set; } = false;
-        public bool UseAbsolutePaths { get; set; } = false;
+        public PathStorageMode PathStorageMode { get; set; } = PathStorageMode.Relative;
         public bool ShowFilterPanel { get; set; } = false;
-        public bool OptimizeForHDD { get; set; } = false;
+        public ProcessingMode ProcessingMode { get; set; } = ProcessingMode.Auto;
         public bool ShowFullPaths { get; set; } = false;
+
+        // NEW: Advanced Bar Settings
+        public bool ShowAdvancedBar { get; set; } = false;
+        public string PathPrefix { get; set; } = "";
+        public string IncludePattern { get; set; } = "";
+        public string ExcludePattern { get; set; } = "";
+        public bool ScanRecursive { get; set; } = true;
 
         public string CustomSignature { get; set; } = "L33T";
         public HashType DefaultAlgo { get; set; } = HashType.XxHash3;
@@ -26,12 +32,11 @@ namespace SharpSFV
         public bool HasCustomLocation { get; private set; } = false;
         public int SplitterDistance { get; set; } = -1;
 
-        // NEW: View Settings
+        // View Settings
         public bool ShowHashCol { get; set; } = true;
         public bool ShowExpectedHashCol { get; set; } = true;
-        public bool LockColumns { get; set; } = true; // Enabled by default as requested
+        public bool LockColumns { get; set; } = true;
 
-        // Dictionary to store "ColumnTag" -> "DisplayIndex"
         public Dictionary<string, int> ColumnOrder { get; set; } = new Dictionary<string, int>();
 
         public AppSettings(string appExecutablePath)
@@ -61,11 +66,35 @@ namespace SharpSFV
                     string val = parts[1].Trim();
 
                     if (key.Equals("TimeTab", StringComparison.OrdinalIgnoreCase)) ShowTimeTab = (val == "1");
-                    else if (key.Equals("UseAbsolutePaths", StringComparison.OrdinalIgnoreCase)) UseAbsolutePaths = (val == "1");
+
+                    else if (key.Equals("PathStorageMode", StringComparison.OrdinalIgnoreCase))
+                    {
+                        if (Enum.TryParse<PathStorageMode>(val, true, out var result)) PathStorageMode = result;
+                    }
+                    else if (key.Equals("UseAbsolutePaths", StringComparison.OrdinalIgnoreCase))
+                    {
+                        if (val == "1") PathStorageMode = PathStorageMode.Absolute;
+                    }
+
                     else if (key.Equals("ShowFilterPanel", StringComparison.OrdinalIgnoreCase)) ShowFilterPanel = (val == "1");
-                    else if (key.Equals("OptimizeForHDD", StringComparison.OrdinalIgnoreCase)) OptimizeForHDD = (val == "1");
+
+                    // Advanced Bar Loading
+                    else if (key.Equals("ShowAdvancedBar", StringComparison.OrdinalIgnoreCase)) ShowAdvancedBar = (val == "1");
+                    else if (key.Equals("PathPrefix", StringComparison.OrdinalIgnoreCase)) PathPrefix = val;
+                    else if (key.Equals("IncludePattern", StringComparison.OrdinalIgnoreCase)) IncludePattern = val;
+                    else if (key.Equals("ExcludePattern", StringComparison.OrdinalIgnoreCase)) ExcludePattern = val;
+                    else if (key.Equals("ScanRecursive", StringComparison.OrdinalIgnoreCase)) ScanRecursive = (val == "1");
+
+                    else if (key.Equals("ProcessingMode", StringComparison.OrdinalIgnoreCase))
+                    {
+                        if (Enum.TryParse<ProcessingMode>(val, true, out var result)) ProcessingMode = result;
+                    }
+                    else if (key.Equals("OptimizeForHDD", StringComparison.OrdinalIgnoreCase))
+                    {
+                        if (val == "1") ProcessingMode = ProcessingMode.HDD;
+                    }
+
                     else if (key.Equals("ShowFullPaths", StringComparison.OrdinalIgnoreCase)) ShowFullPaths = (val == "1");
-                    // New View Keys
                     else if (key.Equals("ShowHashCol", StringComparison.OrdinalIgnoreCase)) ShowHashCol = (val == "1");
                     else if (key.Equals("ShowExpectedHashCol", StringComparison.OrdinalIgnoreCase)) ShowExpectedHashCol = (val == "1");
                     else if (key.Equals("LockColumns", StringComparison.OrdinalIgnoreCase)) LockColumns = (val == "1");
@@ -120,7 +149,6 @@ namespace SharpSFV
             {
                 Rectangle bounds = (form.WindowState == FormWindowState.Normal) ? form.Bounds : form.RestoreBounds;
 
-                // Serialize Column Order
                 string colOrderStr = "";
                 if (lv != null)
                 {
@@ -139,9 +167,20 @@ namespace SharpSFV
                 {
                     sw.WriteLine("[SharpSFV]");
                     sw.WriteLine($"TimeTab={(isTimeTabEnabled ? "1" : "0")}");
-                    sw.WriteLine($"UseAbsolutePaths={(UseAbsolutePaths ? "1" : "0")}");
+
+                    sw.WriteLine($"PathStorageMode={PathStorageMode}");
+                    sw.WriteLine($"UseAbsolutePaths={(PathStorageMode == PathStorageMode.Absolute ? "1" : "0")}");
+
                     sw.WriteLine($"ShowFilterPanel={(ShowFilterPanel ? "1" : "0")}");
-                    sw.WriteLine($"OptimizeForHDD={(OptimizeForHDD ? "1" : "0")}");
+
+                    // Advanced Bar Saving
+                    sw.WriteLine($"ShowAdvancedBar={(ShowAdvancedBar ? "1" : "0")}");
+                    sw.WriteLine($"PathPrefix={PathPrefix}");
+                    sw.WriteLine($"IncludePattern={IncludePattern}");
+                    sw.WriteLine($"ExcludePattern={ExcludePattern}");
+                    sw.WriteLine($"ScanRecursive={(ScanRecursive ? "1" : "0")}");
+
+                    sw.WriteLine($"ProcessingMode={ProcessingMode}");
                     sw.WriteLine($"ShowFullPaths={(ShowFullPaths ? "1" : "0")}");
 
                     sw.WriteLine($"ShowHashCol={(ShowHashCol ? "1" : "0")}");
@@ -157,6 +196,15 @@ namespace SharpSFV
                     sw.WriteLine($"WindowPosY={bounds.Y}");
                     sw.WriteLine($"SplitterPos={currentSplitterDist}");
                 }
+            }
+            catch { }
+        }
+
+        public void ResetToDefaults()
+        {
+            try
+            {
+                if (File.Exists(_iniPath)) File.Delete(_iniPath);
             }
             catch { }
         }

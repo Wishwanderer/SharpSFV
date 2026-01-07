@@ -7,46 +7,25 @@ using System.Drawing;
 using System.IO;
 using System.Linq;
 using System.Media;
-using System.Runtime;
 using System.Threading;
 using System.Threading.Channels;
 using System.Threading.Tasks;
 using System.Windows.Forms;
+using System.Text.RegularExpressions;
 
 namespace SharpSFV
 {
     public partial class Form1
     {
-        private async Task HandleDroppedPaths(string[] paths)
-        {
-            if (paths.Length == 0) return;
-            bool containsFolder = paths.Any(p => Directory.Exists(p));
-
-            _listSorter.SortColumn = -1;
-            _listSorter.Order = SortOrder.None;
-            UpdateSortVisuals(-1, SortOrder.None);
-
-            if (!containsFolder && paths.Length == 1 && _verificationExtensions.Contains(Path.GetExtension(paths[0])) && File.Exists(paths[0]))
-            {
-                await RunVerification(paths[0]);
-            }
-            else
-            {
-                string baseDirectory = "";
-                if (paths.Length == 1 && Directory.Exists(paths[0])) baseDirectory = paths[0];
-                else
-                {
-                    var parentDirs = paths.Select(p => Path.GetDirectoryName(p) ?? p).ToList();
-                    baseDirectory = FindCommonBasePath(parentDirs);
-                }
-
-                await RunHashCreation(paths, baseDirectory);
-            }
-        }
-
         private async Task ProcessFileEntry(string fullPath, string baseDir, int originalIndex, ChannelWriter<FileJob> writer, List<int> uiBatch)
         {
-            // OPTIMIZATION: Span-based path manipulation to avoid allocations before pooling
+            // NEW: Advanced Bar Filtering
+            if (_settings.ShowAdvancedBar)
+            {
+                string fileName = Path.GetFileName(fullPath);
+                if (!IsFileAllowed(fileName)) return;
+            }
+
             ReadOnlySpan<char> pathSpan = fullPath.AsSpan();
             ReadOnlySpan<char> baseSpan = baseDir.AsSpan();
 
@@ -55,16 +34,13 @@ namespace SharpSFV
             if (pathSpan.StartsWith(baseSpan, StringComparison.OrdinalIgnoreCase) && pathSpan.Length > baseSpan.Length)
             {
                 int offset = baseSpan.Length;
-                // Handle trailing slash in base
                 if (pathSpan[offset] == Path.DirectorySeparatorChar || pathSpan[offset] == Path.AltDirectorySeparatorChar)
                     offset++;
 
-                // Zero-allocation string pooling from Span
                 pooledRelPath = StringPool.GetOrAdd(pathSpan.Slice(offset));
             }
             else
             {
-                // Fallback for complex relative paths
                 try
                 {
                     string rel = Path.GetRelativePath(baseDir, fullPath);
@@ -76,25 +52,73 @@ namespace SharpSFV
                 }
             }
 
-            // Zero-allocation filename pooling
             var fileNameSpan = Path.GetFileName(pathSpan);
             string pooledFileName = StringPool.GetOrAdd(fileNameSpan);
 
-            // Add to Store (SoA)
             int storeIndex = _fileStore.Add(pooledFileName, pooledRelPath, baseDir, originalIndex, ItemStatus.Queued);
 
-            // Add to UI Batch
             uiBatch.Add(storeIndex);
 
-            // Create Job Struct (No Object Allocation)
             var job = new FileJob(storeIndex, fullPath, null);
-
             await writer.WriteAsync(job, _cts!.Token);
+        }
+
+        private bool IsFileAllowed(string filename)
+        {
+            // Exclude Check
+            if (!string.IsNullOrWhiteSpace(_settings.ExcludePattern))
+            {
+                var patterns = _settings.ExcludePattern.Split(new[] { ';', ',' }, StringSplitOptions.RemoveEmptyEntries);
+                foreach (var p in patterns)
+                {
+                    if (FitsMask(filename, p.Trim())) return false;
+                }
+            }
+
+            // Include Check
+            if (!string.IsNullOrWhiteSpace(_settings.IncludePattern))
+            {
+                bool match = false;
+                var patterns = _settings.IncludePattern.Split(new[] { ';', ',' }, StringSplitOptions.RemoveEmptyEntries);
+                // If patterns exist but are empty strings, treat as *
+                if (patterns.Length == 0) return true;
+
+                foreach (var p in patterns)
+                {
+                    if (FitsMask(filename, p.Trim()))
+                    {
+                        match = true;
+                        break;
+                    }
+                }
+                if (!match) return false;
+            }
+
+            return true;
+        }
+
+        private bool FitsMask(string fileName, string fileMask)
+        {
+            if (string.IsNullOrEmpty(fileMask) || fileMask == "*.*" || fileMask == "*") return true;
+
+            // Optimization for simple extensions
+            if (fileMask.StartsWith("*") && !fileMask.Contains("?") && fileMask.IndexOf('*', 1) == -1)
+            {
+                return fileName.EndsWith(fileMask.Substring(1), StringComparison.OrdinalIgnoreCase);
+            }
+
+            try
+            {
+                string pattern = "^" + Regex.Escape(fileMask)
+                    .Replace("\\*", ".*")
+                    .Replace("\\?", ".") + "$";
+                return Regex.IsMatch(fileName, pattern, RegexOptions.IgnoreCase);
+            }
+            catch { return true; } // Fail open on bad regex
         }
 
         private void ThrottledUiUpdate(int current, int total, int ok, int bad, int missing)
         {
-            // Modulo throttling
             if (current % 50 != 0 && total == -1) return;
 
             long now = DateTime.UtcNow.Ticks;
@@ -128,10 +152,8 @@ namespace SharpSFV
                 else _btnStop.Enabled = processing;
             }
 
-            // FIX: Clear the total time label when starting a NEW operation
             if (processing && _lblTotalTime != null)
             {
-                // Use Invoke/BeginInvoke to be thread-safe if called from non-UI context (rare but safer)
                 if (this.InvokeRequired)
                     this.BeginInvoke(new Action(() => _lblTotalTime.Text = ""));
                 else
@@ -170,7 +192,6 @@ namespace SharpSFV
                     this.Text = $"SharpSFV - Creation Complete [{_currentHashType}]";
                 }
 
-                // FIX: Update Total Time Label format
                 if (_settings.ShowTimeTab && !isCancelled && _lblTotalTime != null)
                 {
                     _lblTotalTime.Text = $"Total Elapsed Time: {sw.ElapsedMilliseconds} ms";

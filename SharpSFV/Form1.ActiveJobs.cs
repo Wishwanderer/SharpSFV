@@ -30,7 +30,6 @@ namespace SharpSFV
             _lvActiveJobs.Columns.Add("Name", 300);
             _lvActiveJobs.Columns.Add("Progress", 220);
 
-            // Prevent manual resizing of the progress column for cleaner look
             _lvActiveJobs.ColumnWidthChanging += LvActiveJobs_ColumnWidthChanging;
 
             _mainSplitter.Panel1.Controls.Add(_lvActiveJobs);
@@ -54,7 +53,6 @@ namespace SharpSFV
                     }
                     else
                     {
-                        // Default to 20% height or minimum 50px
                         targetDistance = Math.Max(50, _mainSplitter.Height / 5);
                     }
 
@@ -66,7 +64,6 @@ namespace SharpSFV
             }
         }
 
-        // UPDATED: Accepts Index and Name (Primitive types) instead of Object
         private void AddActiveJob(int index, string fileName)
         {
             if (_lvActiveJobs == null) return;
@@ -74,7 +71,7 @@ namespace SharpSFV
 
             var item = new ListViewItem(fileName);
             item.SubItems.Add("Starting...");
-            item.Tag = index; // Store Integer Index
+            item.Tag = index;
             _lvActiveJobs.Items.Add(item);
 
             ToggleActiveJobsPanel(true);
@@ -92,9 +89,9 @@ namespace SharpSFV
 
             foreach (ListViewItem item in _lvActiveJobs.Items)
             {
-                // Unbox index
                 if (item.Tag is int idx && idx == index)
                 {
+                    // Updated Format: F1 (e.g., "12.5%")
                     item.SubItems[1].Text = $"{percent:F1}%";
                     return;
                 }

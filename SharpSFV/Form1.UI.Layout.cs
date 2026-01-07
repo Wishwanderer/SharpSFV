@@ -33,6 +33,7 @@ namespace SharpSFV
 
             // 3. Top Panels
             if (_filterPanel != null) this.Controls.Add(_filterPanel);
+            if (_advancedPanel != null) this.Controls.Add(_advancedPanel);
             if (_statsPanel != null) this.Controls.Add(_statsPanel);
             if (_menuStrip != null) this.Controls.Add(_menuStrip);
         }
@@ -44,7 +45,6 @@ namespace SharpSFV
             _lblProgress = new Label { Text = "Ready", AutoSize = true, Location = new Point(10, 8) };
             _lblProgress.Font = _fontBold;
 
-            // NEW: Total Time Label (Hidden by default until enabled)
             _lblTotalTime = new Label
             {
                 Text = "",
@@ -77,7 +77,7 @@ namespace SharpSFV
             _btnStop.Click += (s, e) => { _cts?.Cancel(); };
 
             _statsPanel.Controls.Add(_lblProgress);
-            _statsPanel.Controls.Add(_lblTotalTime); // Add to panel
+            _statsPanel.Controls.Add(_lblTotalTime);
             _statsPanel.Controls.Add(_statsFlowPanel);
             _statsPanel.Controls.Add(_btnStop);
         }
@@ -91,7 +91,6 @@ namespace SharpSFV
 
             _txtFilter.TextChanged += (s, e) =>
             {
-                // Debounce filter to prevent UI lag on large lists
                 _filterDebounceTimer?.Change(300, System.Threading.Timeout.Infinite);
             };
 
@@ -111,7 +110,6 @@ namespace SharpSFV
 
         private void SetupUIForMode(string mode)
         {
-            // Unsubscribe to prevent firing events while clearing
             lvFiles.ColumnWidthChanging -= LvFiles_ColumnWidthChanging;
 
             lvFiles.Columns.Clear();
@@ -123,28 +121,27 @@ namespace SharpSFV
 
             lvFiles.AllowColumnReorder = !_settings.LockColumns;
 
-            void AddCol(string text, int width, string tag)
+            // Local helper to avoid conflict with class-level AddCol
+            void AddColLocal(string text, int width, string tag)
             {
                 ColumnHeader ch = lvFiles.Columns.Add(text, width);
                 ch.Tag = tag;
                 _originalColWidths[ch.Index] = width;
             }
 
-            AddCol("File Name", 300, "Name");
+            AddColLocal("File Name", 300, "Name");
 
             if (_settings.ShowHashCol)
-                AddCol("Hash", 220, "Hash");
+                AddColLocal("Hash", 220, "Hash");
 
-            AddCol("Status", 100, "Status");
+            AddColLocal("Status", 100, "Status");
 
             if (_isVerificationMode && _settings.ShowExpectedHashCol)
-                AddCol("Expected Hash", 220, "Expected");
+                AddColLocal("Expected Hash", 220, "Expected");
 
             if (_settings.ShowTimeTab)
-                AddCol("Time", 80, "Time");
+                AddColLocal("Time", 80, "Time");
 
-            // Toggle Label Visibility
-            // FIX: Removed logic that cleared text when hidden, allowing persistence.
             if (_lblTotalTime != null)
             {
                 _lblTotalTime.Visible = _settings.ShowTimeTab;
@@ -152,7 +149,6 @@ namespace SharpSFV
 
             this.Text = (_isVerificationMode) ? "SharpSFV - Verify" : $"SharpSFV - Create [{_currentHashType}]";
 
-            // Restore saved column order
             if (_settings.ColumnOrder.Count > 0)
             {
                 foreach (ColumnHeader ch in lvFiles.Columns)
@@ -165,7 +161,6 @@ namespace SharpSFV
                 }
             }
 
-            // Update Active Jobs columns to match main list aesthetics
             if (_lvActiveJobs != null)
             {
                 if (_lvActiveJobs.Columns.Count > 0) _lvActiveJobs.Columns[0].Width = 300;
@@ -183,17 +178,22 @@ namespace SharpSFV
             {
                 this.StartPosition = FormStartPosition.Manual;
                 this.Location = _settings.WindowLocation;
-                // Ensure window is on-screen
                 bool isOnScreen = Screen.AllScreens.Any(s => s.WorkingArea.IntersectsWith(this.Bounds));
                 if (!isOnScreen) this.StartPosition = FormStartPosition.CenterScreen;
             }
 
-            // Apply Menu State
-            if (_menuOptionsTime != null) _menuOptionsTime.Checked = _settings.ShowTimeTab;
-            if (_menuOptionsAbsolutePaths != null) _menuOptionsAbsolutePaths.Checked = _settings.UseAbsolutePaths;
+            // FIXED: Using correct View Menu references
+            if (_menuViewTime != null) _menuViewTime.Checked = _settings.ShowTimeTab;
+            if (_menuViewShowFullPaths != null) _menuViewShowFullPaths.Checked = _settings.ShowFullPaths;
+
             if (_menuOptionsFilter != null) _menuOptionsFilter.Checked = _settings.ShowFilterPanel;
-            if (_menuOptionsHDD != null) _menuOptionsHDD.Checked = _settings.OptimizeForHDD;
-            if (_menuOptionsShowFullPaths != null) _menuOptionsShowFullPaths.Checked = _settings.ShowFullPaths;
+
+            // Apply Advanced Bar Settings
+            if (_menuOptionsAdvanced != null) _menuOptionsAdvanced.Checked = _settings.ShowAdvancedBar;
+            if (_advancedPanel != null) _advancedPanel.Visible = _settings.ShowAdvancedBar;
+
+            SetProcessingMode(_settings.ProcessingMode);
+            SetPathStorageMode(_settings.PathStorageMode);
 
             if (_menuViewHash != null) _menuViewHash.Checked = _settings.ShowHashCol;
             if (_menuViewExpected != null) _menuViewExpected.Checked = _settings.ShowExpectedHashCol;
@@ -201,26 +201,9 @@ namespace SharpSFV
 
             if (_filterPanel != null) _filterPanel.Visible = _settings.ShowFilterPanel;
 
-            // Trigger visual updates
             ToggleTimeColumn();
             SetAlgorithm(_settings.DefaultAlgo);
             ToggleShowFullPaths(false);
-        }
-
-        private void UpdateStats(int current, int total, int ok, int bad, int missing)
-        {
-            if (_lblProgress != null) { _lblProgress.Text = $"Completed files: {current} / {total}"; _lblProgress.Update(); }
-            if (_lblStatsOK != null) _lblStatsOK.Text = $"OK: {ok}";
-            if (_lblStatsBad != null) _lblStatsBad.Text = $"BAD: {bad}";
-            if (_lblStatsMissing != null) _lblStatsMissing.Text = $"MISSING: {missing}";
-
-            // Enable "Delete BAD Script" only if errors exist
-            if (_menuGenBadFiles != null)
-            {
-                _menuGenBadFiles.Enabled = (bad > 0);
-            }
-
-            _statsFlowPanel?.Update();
         }
     }
 }

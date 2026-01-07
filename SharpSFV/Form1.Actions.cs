@@ -1,13 +1,13 @@
-﻿using SharpSFV.Utils;
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
 using System.IO;
 using System.Linq;
-using System.Media;
 using System.Text;
 using System.Windows.Forms;
+using SharpSFV.Models;
+using SharpSFV.Utils;
 
 namespace SharpSFV
 {
@@ -53,7 +53,6 @@ namespace SharpSFV
             int storeIndex = _displayIndices[uiIndex];
 
             string currentPath = _fileStore.GetFullPath(storeIndex);
-            // Fix CS8600: Null Coalesce if name is missing (shouldn't happen for valid files)
             string currentName = _fileStore.FileNames[storeIndex] ?? "";
 
             string newName = SimpleInputDialog.ShowDialog("Rename File", "Enter new filename:", currentName);
@@ -62,11 +61,7 @@ namespace SharpSFV
             {
                 try
                 {
-                    // Fix CS8600: BaseDirectories might be null in SoA
                     string baseDir = _fileStore.BaseDirectories[storeIndex] ?? "";
-
-                    // Note: BaseDirectories is the scanning root, not necessarily the immediate parent.
-                    // We need the directory of the actual file.
                     string? fileDir = Path.GetDirectoryName(currentPath);
                     if (fileDir == null) fileDir = baseDir;
 
@@ -74,16 +69,12 @@ namespace SharpSFV
 
                     File.Move(currentPath, newPath);
 
-                    // Update SoA Arrays
                     _fileStore.FileNames[storeIndex] = newName;
 
-                    // Update Relative Path Logic
-                    // Fix CS8600: RelativePaths might be null
                     string oldRel = _fileStore.RelativePaths[storeIndex] ?? currentName;
                     string? relDir = Path.GetDirectoryName(oldRel);
                     string newRel = string.IsNullOrEmpty(relDir) ? newName : Path.Combine(relDir, newName);
 
-                    // We don't pool here since it's a unique rename
                     _fileStore.RelativePaths[storeIndex] = newRel;
 
                     lvFiles.Invalidate();
@@ -106,15 +97,9 @@ namespace SharpSFV
                 {
                     File.Delete(fullPath);
 
-                    // Remove from Store O(N) but rare operation
                     _fileStore.RemoveAt(storeIndex);
-
-                    // Rebuild Display Indices completely to ensure consistency
-                    // (Faster than trying to shift indices in the list)
                     _displayIndices.RemoveAt(uiIndex);
 
-                    // Since Store shifted, all indices > storeIndex in _displayIndices are now invalid (off by 1)
-                    // We must decrement them.
                     for (int i = 0; i < _displayIndices.Count; i++)
                     {
                         if (_displayIndices[i] > storeIndex) _displayIndices[i]--;
@@ -132,21 +117,18 @@ namespace SharpSFV
 
             lvFiles.BeginUpdate();
 
-            // Get Store Indices to remove
             var indicesToRemove = new List<int>();
             foreach (int uiIdx in lvFiles.SelectedIndices)
             {
                 indicesToRemove.Add(_displayIndices[uiIdx]);
             }
-            indicesToRemove.Sort(); // Ascending
+            indicesToRemove.Sort();
 
-            // Remove from Store in reverse order to preserve validity of lower indices
             for (int i = indicesToRemove.Count - 1; i >= 0; i--)
             {
                 _fileStore.RemoveAt(indicesToRemove[i]);
             }
 
-            // Rebuild Display List - Simplest approach after bulk removal
             _displayIndices.Clear();
             for (int i = 0; i < _fileStore.Count; i++) _displayIndices.Add(i);
 
@@ -161,7 +143,10 @@ namespace SharpSFV
         private void PerformSelectAllAction()
         {
             lvFiles.BeginUpdate();
-            for (int i = 0; i < lvFiles.VirtualListSize; i++) lvFiles.Items[i].Selected = true;
+            for (int i = 0; i < lvFiles.VirtualListSize; i++)
+            {
+                lvFiles.Items[i].Selected = true;
+            }
             lvFiles.EndUpdate();
         }
 
@@ -169,14 +154,28 @@ namespace SharpSFV
         {
             if (lvFiles.SelectedIndices.Count == 0) return;
             var sb = new StringBuilder();
-            foreach (int index in lvFiles.SelectedIndices)
+
+            if (_isJobMode)
             {
-                int storeIdx = _displayIndices[index];
-                // Fix CS8600: Handle null name
-                string name = _fileStore.FileNames[storeIdx] ?? "";
-                sb.AppendLine($"{name}\t{_fileStore.GetCalculatedHashString(storeIdx)}\t{_fileStore.Statuses[storeIdx]}");
+                foreach (int index in lvFiles.SelectedIndices)
+                {
+                    if (index < _jobStore.Count)
+                    {
+                        sb.AppendLine($"{_jobStore.Names[index]}\t{_jobStore.Statuses[index]}\t{_jobStore.Progress[index]:F1}%");
+                    }
+                }
             }
-            try { Clipboard.SetText(sb.ToString()); } catch (Exception ex) { MessageBox.Show(ex.Message); }
+            else
+            {
+                foreach (int index in lvFiles.SelectedIndices)
+                {
+                    int storeIdx = _displayIndices[index];
+                    string name = _fileStore.FileNames[storeIdx] ?? "";
+                    sb.AppendLine($"{name}\t{_fileStore.GetCalculatedHashString(storeIdx)}\t{_fileStore.Statuses[storeIdx]}");
+                }
+            }
+
+            try { Clipboard.SetText(sb.ToString()); } catch { }
         }
 
         private void PerformPasteAction()
@@ -208,20 +207,11 @@ namespace SharpSFV
 
         private void PerformSaveAction()
         {
-            if (_fileStore.Count == 0) { MessageBox.Show("No files to save."); return; }
+            if (_fileStore.Count == 0 && !_isJobMode) { MessageBox.Show("No files to save."); return; }
+            if (_isJobMode) { MessageBox.Show("Job Mode saves checksums automatically upon completion."); return; }
 
             string defaultFileName = "checksums";
             string initialDirectory = GetCurrentRootDirectory();
-
-            // Try to find a sensible default name from the first item
-            if (_fileStore.Count > 0)
-            {
-                string? baseDir = _fileStore.BaseDirectories[0];
-                if (!string.IsNullOrEmpty(baseDir))
-                {
-                    try { defaultFileName = new DirectoryInfo(baseDir).Name; } catch { }
-                }
-            }
 
             string fileFilter;
             string defaultExt;
@@ -251,7 +241,6 @@ namespace SharpSFV
                             sw.WriteLine($"; Generated by SharpSFV (Signature: {_settings.CustomSignature})");
                             sw.WriteLine($"; Algorithm: {_currentHashType}");
 
-                            // Iterate all items in store
                             for (int i = 0; i < _fileStore.Count; i++)
                             {
                                 if (_fileStore.IsSummaryRows[i]) continue;
@@ -261,13 +250,32 @@ namespace SharpSFV
 
                                 if (!hash.Contains("...") && status != ItemStatus.Queued && status != ItemStatus.Pending && !string.IsNullOrEmpty(hash))
                                 {
-                                    string pathToWrite;
                                     string fullPath = _fileStore.GetFullPath(i);
+                                    string pathToWrite = fullPath;
 
-                                    if (_menuOptionsAbsolutePaths != null && _menuOptionsAbsolutePaths.Checked)
-                                        pathToWrite = fullPath;
-                                    else
-                                        try { pathToWrite = Path.GetRelativePath(saveDirectory, fullPath); } catch { pathToWrite = fullPath; }
+                                    // 1. Determine Base Path (Relative/Absolute)
+                                    if (_settings.PathStorageMode == PathStorageMode.Relative)
+                                    {
+                                        try
+                                        {
+                                            string relPath = Path.GetRelativePath(saveDirectory, fullPath);
+                                            if (Path.IsPathRooted(relPath) && !relPath.StartsWith("."))
+                                            {
+                                                pathToWrite = _fileStore.RelativePaths[i] ?? Path.GetFileName(fullPath);
+                                            }
+                                            else
+                                            {
+                                                pathToWrite = relPath;
+                                            }
+                                        }
+                                        catch { pathToWrite = fullPath; }
+                                    }
+
+                                    // 2. NEW: Prepend Prefix if Advanced Bar Enabled
+                                    if (_settings.ShowAdvancedBar && !string.IsNullOrEmpty(_settings.PathPrefix))
+                                    {
+                                        pathToWrite = Path.Combine(_settings.PathPrefix, pathToWrite);
+                                    }
 
                                     sw.WriteLine($"{hash} *{pathToWrite}");
                                 }
@@ -340,9 +348,10 @@ namespace SharpSFV
                             sw.WriteLine("@echo off");
                             sw.WriteLine("echo Copying duplicates (Source: 1st file -> Dest: duplicates)...");
 
-                            // Group using indices
-                            var indices = Enumerable.Range(0, _fileStore.Count).Where(i => !_fileStore.IsSummaryRows[i]);
-                            var groups = indices.GroupBy(i => _fileStore.GetCalculatedHashString(i));
+                            var validIndices = new List<int>();
+                            for (int i = 0; i < _fileStore.Count; i++) if (!_fileStore.IsSummaryRows[i]) validIndices.Add(i);
+
+                            var groups = validIndices.GroupBy(i => _fileStore.GetCalculatedHashString(i));
 
                             foreach (var g in groups)
                             {
@@ -384,8 +393,10 @@ namespace SharpSFV
                             sw.WriteLine("@echo off");
                             sw.WriteLine("echo Deleting duplicate files (Keeping 1st, deleting rest)...");
 
-                            var indices = Enumerable.Range(0, _fileStore.Count).Where(i => !_fileStore.IsSummaryRows[i]);
-                            var groups = indices.GroupBy(i => _fileStore.GetCalculatedHashString(i));
+                            var validIndices = new List<int>();
+                            for (int i = 0; i < _fileStore.Count; i++) if (!_fileStore.IsSummaryRows[i]) validIndices.Add(i);
+
+                            var groups = validIndices.GroupBy(i => _fileStore.GetCalculatedHashString(i));
 
                             foreach (var g in groups)
                             {
@@ -468,7 +479,7 @@ namespace SharpSFV
 
             Label lbl = new Label
             {
-                Text = "SharpSFV v2.40\nInspired by QuickSFV\n\nCreated by L33T.",
+                Text = "SharpSFV v2.50\nInspired by QuickSFV.\n\nCreated by L33T.",
                 AutoSize = false,
                 TextAlign = ContentAlignment.MiddleCenter,
                 Dock = DockStyle.Top,
@@ -496,12 +507,19 @@ namespace SharpSFV
         {
             if (_fileStore.Count > 0)
             {
-                // Fix CS8600: Handle null BaseDirectories[0]
                 string? baseDir = _fileStore.BaseDirectories[0];
                 if (!string.IsNullOrEmpty(baseDir)) return baseDir;
                 return Path.GetDirectoryName(_fileStore.GetFullPath(0)) ?? "";
             }
             return "";
+        }
+
+        private void PerformResetDefaults()
+        {
+            _settings.ResetToDefaults();
+            _skipSaveOnClose = true;
+            Application.Restart();
+            Environment.Exit(0);
         }
 
         #endregion

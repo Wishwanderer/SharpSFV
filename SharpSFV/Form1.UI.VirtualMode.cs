@@ -2,8 +2,10 @@
 using System.Collections.Generic;
 using System.Drawing;
 using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
+using SharpSFV.Models;
 using SharpSFV.Interop;
 
 namespace SharpSFV
@@ -12,66 +14,110 @@ namespace SharpSFV
     {
         private void LvFiles_RetrieveVirtualItem(object? sender, RetrieveVirtualItemEventArgs e)
         {
-            // SoA: Map UI Index -> Store Index
-            if (e.ItemIndex < 0 || e.ItemIndex >= _displayIndices.Count) return;
-            int storeIdx = _displayIndices[e.ItemIndex];
-
-            // Access Raw Arrays
-            // Fix CS8600: Handle null filename
-            string displayName = _settings.ShowFullPaths
-                ? _fileStore.GetFullPath(storeIdx)
-                : (_fileStore.FileNames[storeIdx] ?? "");
-
-            var item = new ListViewItem(displayName);
-
-            if (_settings.ShowHashCol)
-                item.SubItems.Add(_fileStore.GetCalculatedHashString(storeIdx));
-
-            // Status Enum
-            var status = _fileStore.Statuses[storeIdx];
-            item.SubItems.Add(status.ToString());
-
-            if (_isVerificationMode && _settings.ShowExpectedHashCol)
-                item.SubItems.Add(_fileStore.GetExpectedHashString(storeIdx));
-
-            if (_settings.ShowTimeTab)
-                item.SubItems.Add(_fileStore.TimeStrs[storeIdx]);
-
-            // Visual Logic (Recalculated on fly to avoid storing Color objects)
-            // This is cheap compared to object overhead
-            if (status == ItemStatus.Error || status == ItemStatus.Bad)
+            if (_isJobMode)
             {
-                item.ForeColor = ColRedText;
-                item.BackColor = ColRedBack;
-            }
-            else if (status == ItemStatus.OK)
-            {
-                if (_fileStore.IsSummaryRows[storeIdx])
-                {
-                    item.ForeColor = Color.Blue;
-                }
+                // --- JOB MODE RENDER ---
+                if (e.ItemIndex < 0 || e.ItemIndex >= _jobStore.Count) return;
+
+                int idx = e.ItemIndex;
+
+                // Column 0: Job Name
+                var item = new ListViewItem(_jobStore.Names[idx]);
+
+                // Column 1: Root Path
+                item.SubItems.Add(_jobStore.RootPaths[idx]);
+
+                // Column 2: Progress
+                JobStatus status = _jobStore.Statuses[idx];
+                if (status == JobStatus.InProgress)
+                    item.SubItems.Add($"{_jobStore.Progress[idx]:F1}%");
+                else if (status == JobStatus.Queued)
+                    item.SubItems.Add("Pending");
                 else
+                    item.SubItems.Add("100%");
+
+                // Column 3: Status
+                string statusStr = status switch
                 {
-                    item.ForeColor = ColGreenText;
-                    item.BackColor = ColGreenBack;
+                    JobStatus.Done => "DONE",
+                    JobStatus.InProgress => "IN PROGRESS",
+                    JobStatus.Error => "ERROR",
+                    _ => "QUEUED"
+                };
+                item.SubItems.Add(statusStr);
+
+                // Colors
+                switch (status)
+                {
+                    case JobStatus.Done:
+                        item.ForeColor = ColGreenText;
+                        item.BackColor = ColGreenBack;
+                        break;
+                    case JobStatus.Error:
+                        item.ForeColor = ColRedText;
+                        item.BackColor = ColRedBack;
+                        break;
+                    case JobStatus.InProgress:
+                        item.BackColor = Color.AliceBlue;
+                        break;
                 }
+
+                e.Item = item;
             }
-            else if (status == ItemStatus.Missing)
+            else
             {
-                item.ForeColor = ColYellowText;
-                item.BackColor = ColYellowBack;
-                item.Font = _fontStrike;
+                // --- STANDARD MODE RENDER ---
+                if (e.ItemIndex < 0 || e.ItemIndex >= _displayIndices.Count) return;
+                int storeIdx = _displayIndices[e.ItemIndex];
+
+                string displayName = _settings.ShowFullPaths
+                    ? _fileStore.GetFullPath(storeIdx)
+                    : (_fileStore.FileNames[storeIdx] ?? "");
+
+                var item = new ListViewItem(displayName);
+
+                if (_settings.ShowHashCol)
+                    item.SubItems.Add(_fileStore.GetCalculatedHashString(storeIdx));
+
+                var status = _fileStore.Statuses[storeIdx];
+                item.SubItems.Add(status.ToString());
+
+                if (_isVerificationMode && _settings.ShowExpectedHashCol)
+                    item.SubItems.Add(_fileStore.GetExpectedHashString(storeIdx));
+
+                if (_settings.ShowTimeTab)
+                    item.SubItems.Add(_fileStore.TimeStrs[storeIdx]);
+
+                if (status == ItemStatus.Error || status == ItemStatus.Bad)
+                {
+                    item.ForeColor = ColRedText;
+                    item.BackColor = ColRedBack;
+                }
+                else if (status == ItemStatus.OK)
+                {
+                    if (_fileStore.IsSummaryRows[storeIdx]) item.ForeColor = Color.Blue;
+                    else
+                    {
+                        item.ForeColor = ColGreenText;
+                        item.BackColor = ColGreenBack;
+                    }
+                }
+                else if (status == ItemStatus.Missing)
+                {
+                    item.ForeColor = ColYellowText;
+                    item.BackColor = ColYellowBack;
+                    item.Font = _fontStrike;
+                }
+
+                if (_fileStore.IsSummaryRows[storeIdx]) item.Font = _fontBold;
+
+                e.Item = item;
             }
-
-            if (_fileStore.IsSummaryRows[storeIdx])
-                item.Font = _fontBold;
-
-            e.Item = item;
         }
 
         private async void LvFiles_ColumnClick(object? sender, ColumnClickEventArgs e)
         {
-            if (_isProcessing) return;
+            if (_isProcessing || _isJobMode) return;
 
             if (e.Column != _listSorter.SortColumn)
             {
@@ -86,8 +132,6 @@ namespace SharpSFV
             UpdateSortVisuals(e.Column, _listSorter.Order);
             Cursor = Cursors.WaitCursor;
 
-            // Sort the indices, not the data
-            // Since _displayIndices is List<int> and _listSorter is IComparer<int>, this works efficiently
             await Task.Run(() => { _displayIndices.Sort(_listSorter); });
 
             lvFiles.Invalidate();
@@ -106,6 +150,26 @@ namespace SharpSFV
             }
         }
 
+        private void UpdateDisplayList()
+        {
+            Win32Storage.SuspendDrawing(lvFiles);
+            try
+            {
+                if (!_isJobMode)
+                {
+                    if (lvFiles.VirtualListSize != _displayIndices.Count)
+                        lvFiles.VirtualListSize = _displayIndices.Count;
+                }
+                else
+                {
+                    if (lvFiles.VirtualListSize != _jobStore.Count)
+                        lvFiles.VirtualListSize = _jobStore.Count;
+                }
+                lvFiles.Invalidate();
+            }
+            finally { Win32Storage.ResumeDrawing(lvFiles); }
+        }
+
         private void OnFilterDebounce(object? state)
         {
             this.Invoke(new Action(() => ApplyFilter()));
@@ -113,7 +177,9 @@ namespace SharpSFV
 
         private void ApplyFilter()
         {
+            if (_isJobMode) return; // Filtering not currently supported in Job Mode
             if (_txtFilter == null || _cmbStatusFilter == null) return;
+
             string searchText = _txtFilter.Text.Trim();
             string statusFilter = _cmbStatusFilter.SelectedItem?.ToString() ?? "All";
             bool showDuplicates = _chkShowDuplicates?.Checked ?? false;
@@ -125,7 +191,6 @@ namespace SharpSFV
                 if (showDuplicates)
                 {
                     // Group by Hash
-                    // We can just iterate indices where Hash is not null
                     var validIndices = new List<int>();
                     for (int i = 0; i < _fileStore.Count; i++)
                     {
@@ -138,7 +203,6 @@ namespace SharpSFV
                         if (grp.Count() > 1) filteredIndices.AddRange(grp);
                     }
 
-                    // Sort dupes by Hash to group them visually
                     filteredIndices.Sort((a, b) =>
                         string.Compare(_fileStore.GetCalculatedHashString(a),
                                      _fileStore.GetCalculatedHashString(b),
@@ -146,10 +210,9 @@ namespace SharpSFV
                 }
                 else
                 {
-                    // Linear scan over arrays - extremely fast due to prefetching
+                    // Linear scan over arrays
                     for (int i = 0; i < _fileStore.Count; i++)
                     {
-                        // Fix CS8600: Handle nullable name
                         string? name = _fileStore.FileNames[i];
                         bool matchName = string.IsNullOrEmpty(searchText) ||
                                        (name != null && name.Contains(searchText, StringComparison.OrdinalIgnoreCase));
@@ -182,18 +245,6 @@ namespace SharpSFV
             });
         }
 
-        private void UpdateDisplayList()
-        {
-            Win32Storage.SuspendDrawing(lvFiles);
-            try
-            {
-                if (lvFiles.VirtualListSize != _displayIndices.Count)
-                    lvFiles.VirtualListSize = _displayIndices.Count;
-                lvFiles.Invalidate();
-            }
-            finally { Win32Storage.ResumeDrawing(lvFiles); }
-        }
-
         private void LvFiles_ColumnWidthChanging(object? sender, ColumnWidthChangingEventArgs e)
         {
             int orig = 0;
@@ -217,10 +268,10 @@ namespace SharpSFV
             int nameColIndex = -1;
             foreach (ColumnHeader ch in lvFiles.Columns)
             {
-                if (ch.Tag as string == "Name") { nameColIndex = ch.Index; break; }
+                if (ch.Tag as string == "Name" || ch.Tag as string == "JobName") { nameColIndex = ch.Index; break; }
             }
 
-            if (e.ColumnIndex == nameColIndex && _settings.ShowFullPaths)
+            if (e.ColumnIndex == nameColIndex && _settings.ShowFullPaths && !_isJobMode)
             {
                 max = Math.Max(min, _cachedFullPathWidth);
             }
