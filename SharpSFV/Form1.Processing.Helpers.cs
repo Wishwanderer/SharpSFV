@@ -19,7 +19,6 @@ namespace SharpSFV
     {
         private async Task ProcessFileEntry(string fullPath, string baseDir, int originalIndex, ChannelWriter<FileJob> writer, List<int> uiBatch)
         {
-            // NEW: Advanced Bar Filtering
             if (_settings.ShowAdvancedBar)
             {
                 string fileName = Path.GetFileName(fullPath);
@@ -65,7 +64,6 @@ namespace SharpSFV
 
         private bool IsFileAllowed(string filename)
         {
-            // Exclude Check
             if (!string.IsNullOrWhiteSpace(_settings.ExcludePattern))
             {
                 var patterns = _settings.ExcludePattern.Split(new[] { ';', ',' }, StringSplitOptions.RemoveEmptyEntries);
@@ -75,12 +73,10 @@ namespace SharpSFV
                 }
             }
 
-            // Include Check
             if (!string.IsNullOrWhiteSpace(_settings.IncludePattern))
             {
                 bool match = false;
                 var patterns = _settings.IncludePattern.Split(new[] { ';', ',' }, StringSplitOptions.RemoveEmptyEntries);
-                // If patterns exist but are empty strings, treat as *
                 if (patterns.Length == 0) return true;
 
                 foreach (var p in patterns)
@@ -101,7 +97,6 @@ namespace SharpSFV
         {
             if (string.IsNullOrEmpty(fileMask) || fileMask == "*.*" || fileMask == "*") return true;
 
-            // Optimization for simple extensions
             if (fileMask.StartsWith("*") && !fileMask.Contains("?") && fileMask.IndexOf('*', 1) == -1)
             {
                 return fileName.EndsWith(fileMask.Substring(1), StringComparison.OrdinalIgnoreCase);
@@ -114,32 +109,41 @@ namespace SharpSFV
                     .Replace("\\?", ".") + "$";
                 return Regex.IsMatch(fileName, pattern, RegexOptions.IgnoreCase);
             }
-            catch { return true; } // Fail open on bad regex
+            catch { return true; }
         }
 
         private void ThrottledUiUpdate(int current, int total, int ok, int bad, int missing)
         {
+            // 1. Basic modulo check to avoid hitting the timer too often
             if (current % 50 != 0 && total == -1) return;
 
+            // 2. Check time elapsed (100ms)
             long now = DateTime.UtcNow.Ticks;
-            if (now - Interlocked.Read(ref _lastUiUpdateTick) > 500000)
-            {
-                lock (_uiLock)
-                {
-                    if (now - _lastUiUpdateTick > 500000)
-                    {
-                        _lastUiUpdateTick = now;
-                        this.BeginInvoke(new Action(() =>
-                        {
-                            int safeTotal = (total <= 0) ? _fileStore.Count : total;
-                            if (progressBarTotal.Maximum > 0)
-                                progressBarTotal.Value = Math.Min(current, progressBarTotal.Maximum);
+            if (now - Interlocked.Read(ref _lastUiUpdateTick) < 1000000) return;
 
-                            UpdateStats(current, safeTotal, ok, bad, missing);
-                            lvFiles.Invalidate();
-                        }));
+            // 3. Drop-Frame Logic using Atomic Flag
+            // 0 = Free, 1 = Busy
+            if (Interlocked.CompareExchange(ref _uiBusy, 1, 0) == 0)
+            {
+                Interlocked.Exchange(ref _lastUiUpdateTick, now);
+
+                this.BeginInvoke(new Action(() =>
+                {
+                    try
+                    {
+                        int safeTotal = (total <= 0) ? _fileStore.Count : total;
+                        if (progressBarTotal.Maximum > 0)
+                            progressBarTotal.Value = Math.Min(current, progressBarTotal.Maximum);
+
+                        UpdateStats(current, safeTotal, ok, bad, missing);
+                        lvFiles.Invalidate();
                     }
-                }
+                    finally
+                    {
+                        // Release lock
+                        Interlocked.Exchange(ref _uiBusy, 0);
+                    }
+                }));
             }
         }
 

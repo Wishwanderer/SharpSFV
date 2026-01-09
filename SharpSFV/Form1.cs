@@ -16,6 +16,9 @@ namespace SharpSFV
         private AppSettings _settings;
         private bool _skipSaveOnClose = false;
 
+        // NEW: Atomic flag for UI Throttling (0 = Free, 1 = Busy)
+        private int _uiBusy = 0;
+
         // Standard File Store (SoA)
         private FileStore _fileStore = new FileStore();
 
@@ -87,7 +90,6 @@ namespace SharpSFV
         private ToolStripMenuItem? _menuViewTime;
         private ToolStripMenuItem? _menuViewShowFullPaths;
 
-        // REMOVED: _menuOptionsAbsolutePaths (Unused)
         private ToolStripMenuItem? _menuOptionsFilter;
         private ToolStripMenuItem? _menuOptionsAdvanced;
 
