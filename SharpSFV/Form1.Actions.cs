@@ -7,12 +7,68 @@ using System.Linq;
 using System.Text;
 using System.Windows.Forms;
 using SharpSFV.Models;
+using SharpSFV.Interop;
 using SharpSFV.Utils;
 
 namespace SharpSFV
 {
     public partial class Form1
     {
+        #region Control Actions (Pause / Cancel)
+
+        private void PerformTogglePause()
+        {
+            if (!_isProcessing) return;
+
+            if (_isPaused)
+            {
+                // RESUME ACTION
+                _isPaused = false;
+                if (_btnPause != null)
+                {
+                    _btnPause.Text = "Pause";
+                    _btnPause.ForeColor = SystemColors.ControlText; // Standard Color
+                }
+                SetProgressBarColor(Win32Storage.PBST_NORMAL); // Green
+                _pauseEvent.Set(); // Unblock threads
+            }
+            else
+            {
+                // PAUSE ACTION
+                _isPaused = true;
+                if (_btnPause != null)
+                {
+                    _btnPause.Text = "Resume";
+                    _btnPause.ForeColor = Color.DarkGoldenrod; // Visual cue for active pause
+                }
+                SetProgressBarColor(Win32Storage.PBST_PAUSED); // Yellow
+                _pauseEvent.Reset(); // Block threads
+            }
+        }
+
+        private void PerformCancelAction()
+        {
+            if (!_isProcessing) return;
+
+            if (MessageBox.Show("Are you sure you want to cancel the current operation?",
+                "Cancel Operation", MessageBoxButtons.YesNo, MessageBoxIcon.Question) == DialogResult.Yes)
+            {
+                // If paused, resume first so threads can exit/cancel properly
+                if (_isPaused) _pauseEvent.Set();
+
+                // Signal cancellation to background tasks
+                _cts?.Cancel();
+
+                // RESTART APPLICATION LOGIC
+                // We rely on FormClosing to save the current settings (Window position, etc.)
+                // Then we restart to ensure a completely clean state (RAM/Handles).
+                Application.Restart();
+                Environment.Exit(0);
+            }
+        }
+
+        #endregion
+
         #region Context Menu Handlers
 
         private void CtxOpenFolder_Click(object? sender, EventArgs e)
@@ -253,7 +309,6 @@ namespace SharpSFV
                                     string fullPath = _fileStore.GetFullPath(i);
                                     string pathToWrite = fullPath;
 
-                                    // 1. Determine Base Path (Relative/Absolute)
                                     if (_settings.PathStorageMode == PathStorageMode.Relative)
                                     {
                                         try
@@ -271,7 +326,6 @@ namespace SharpSFV
                                         catch { pathToWrite = fullPath; }
                                     }
 
-                                    // 2. NEW: Prepend Prefix if Advanced Bar Enabled
                                     if (_settings.ShowAdvancedBar && !string.IsNullOrEmpty(_settings.PathPrefix))
                                     {
                                         pathToWrite = Path.Combine(_settings.PathPrefix, pathToWrite);
@@ -479,7 +533,7 @@ namespace SharpSFV
 
             Label lbl = new Label
             {
-                Text = "SharpSFV v2.50\nInspired by QuickSFV.\n\nCreated by L33T.",
+                Text = "SharpSFV v2.80\nInspired by QuickSFV\n\nCreated by L33T.",
                 AutoSize = false,
                 TextAlign = ContentAlignment.MiddleCenter,
                 Dock = DockStyle.Top,

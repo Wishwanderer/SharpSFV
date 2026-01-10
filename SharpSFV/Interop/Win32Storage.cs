@@ -25,6 +25,12 @@ namespace SharpSFV.Interop
         // Window Messages
         public const int WM_SETREDRAW = 0x000B;
 
+        // Progress Bar Messages
+        public const int PBM_SETSTATE = 0x0410;
+        public const int PBST_NORMAL = 1; // Green
+        public const int PBST_ERROR = 2;  // Red
+        public const int PBST_PAUSED = 3; // Yellow
+
         // Structures
         [StructLayout(LayoutKind.Sequential)]
         public struct STORAGE_PROPERTY_QUERY
@@ -97,6 +103,11 @@ namespace SharpSFV.Interop
         {
             SendMessage(control.Handle, WM_SETREDRAW, new IntPtr(1), IntPtr.Zero);
             control.Refresh();
+        }
+
+        public static void SetProgressBarState(ProgressBar pBar, int state)
+        {
+            SendMessage(pBar.Handle, PBM_SETSTATE, new IntPtr(state), IntPtr.Zero);
         }
     }
 }

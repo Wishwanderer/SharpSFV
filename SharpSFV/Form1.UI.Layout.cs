@@ -12,30 +12,82 @@ namespace SharpSFV
         {
             this.Controls.Clear();
 
-            // 1. Bottom Progress Bar
+            this.MinimumSize = new Size(600, 400);
+
+            // 1. Configure Components
+
+            // Bottom Progress Bar
             Panel progressPanel = new Panel { Height = 25, Dock = DockStyle.Bottom, Padding = new Padding(2) };
             progressBarTotal.Dock = DockStyle.Fill;
             progressPanel.Controls.Add(progressBarTotal);
-            this.Controls.Add(progressPanel);
 
-            // 2. Main Splitter (Active Jobs vs File List)
+            // List View
+            lvFiles.Dock = DockStyle.Fill;
+            lvFiles.Scrollable = true; // Ensure native scrollbars are enabled
+
+            // Main Splitter
             if (_mainSplitter != null)
             {
+                _mainSplitter.Dock = DockStyle.Fill;
                 if (!_mainSplitter.Panel2.Controls.Contains(lvFiles))
                     _mainSplitter.Panel2.Controls.Add(lvFiles);
+            }
+
+            // 2. ADD CONTROLS TO FORM (Critical Z-Order Logic)
+            // Controls.Add() pushes existing controls to the BACK of the Z-Order.
+            // Layout Engine processes from Front (Index 0) to Back (Index N).
+            // High Priority Docks (Top/Bottom) must be at the Front.
+            // Low Priority Docks (Fill) must be at the Back.
+
+            // Step A: Add the FILL control FIRST (so it gets pushed to the very bottom/back)
+            if (_mainSplitter != null)
+            {
                 this.Controls.Add(_mainSplitter);
             }
             else
             {
-                // Fallback if ActiveJobs failed to init
                 this.Controls.Add(lvFiles);
             }
 
-            // 3. Top Panels
+            // Step B: Add the BOTTOM control (so it sits in front of Fill)
+            this.Controls.Add(progressPanel);
+
+            // Step C: Add the TOP controls (Last added = Top of Z-Order = Highest Priority)
+            // Order: Filter -> Advanced -> Comments -> Stats -> Menu
+            // (Resulting Visual Stack: Menu on top, then Stats, etc.)
+
             if (_filterPanel != null) this.Controls.Add(_filterPanel);
             if (_advancedPanel != null) this.Controls.Add(_advancedPanel);
+            if (_commentsPanel != null) this.Controls.Add(_commentsPanel);
             if (_statsPanel != null) this.Controls.Add(_statsPanel);
             if (_menuStrip != null) this.Controls.Add(_menuStrip);
+        }
+
+        private void SetupCommentsPanel()
+        {
+            _commentsPanel = new Panel
+            {
+                Height = 60,
+                Dock = DockStyle.Top,
+                BackColor = SystemColors.Info,
+                Padding = new Padding(5),
+                Visible = false
+            };
+
+            _txtComments = new TextBox
+            {
+                Multiline = true,
+                ReadOnly = true,
+                ScrollBars = ScrollBars.Vertical,
+                Dock = DockStyle.Fill,
+                BorderStyle = BorderStyle.None,
+                BackColor = SystemColors.Info,
+                ForeColor = SystemColors.InfoText,
+                Font = new Font("Consolas", 9F, FontStyle.Regular),
+                Text = ""
+            };
+
+            _commentsPanel.Controls.Add(_txtComments);
         }
 
         private void SetupStatsPanel()
@@ -61,7 +113,8 @@ namespace SharpSFV
                 Size = new Size(600, 20),
                 AutoSize = true,
                 FlowDirection = FlowDirection.LeftToRight,
-                Padding = new Padding(0)
+                Padding = new Padding(0),
+                WrapContents = false
             };
 
             _lblStatsOK = new Label { Text = "OK: 0", AutoSize = true, ForeColor = Color.DarkGreen, Font = new Font(this.Font, FontStyle.Bold), Margin = new Padding(0, 0, 15, 0) };
@@ -72,14 +125,45 @@ namespace SharpSFV
             _statsFlowPanel.Controls.Add(_lblStatsBad);
             _statsFlowPanel.Controls.Add(_lblStatsMissing);
 
-            _btnStop = new Button { Text = "Stop", Location = new Point(700, 10), Size = new Size(75, 30), BackColor = Color.IndianRed, ForeColor = Color.White, Enabled = false, Anchor = AnchorStyles.Right | AnchorStyles.Top };
-            _btnStop.FlatStyle = FlatStyle.Flat;
-            _btnStop.Click += (s, e) => { _cts?.Cancel(); };
+            int btnWidth = 75;
+            int btnHeight = 26;
+            int margin = 10;
+            int xStop = _statsPanel.ClientSize.Width - btnWidth - margin;
+            int xPause = xStop - btnWidth - margin;
+
+            _btnStop = new Button
+            {
+                Text = "Stop",
+                Location = new Point(xStop, 10),
+                Size = new Size(btnWidth, btnHeight),
+                ForeColor = Color.Red,
+                Enabled = false,
+                Anchor = AnchorStyles.Right | AnchorStyles.Top,
+                UseVisualStyleBackColor = true
+            };
+            _btnStop.Click += (s, e) => PerformCancelAction();
+
+            _btnPause = new Button
+            {
+                Text = "Pause",
+                Location = new Point(xPause, 10),
+                Size = new Size(btnWidth, btnHeight),
+                ForeColor = SystemColors.ControlText,
+                Enabled = false,
+                Anchor = AnchorStyles.Right | AnchorStyles.Top,
+                UseVisualStyleBackColor = true
+            };
+            _btnPause.Click += (s, e) => PerformTogglePause();
 
             _statsPanel.Controls.Add(_lblProgress);
             _statsPanel.Controls.Add(_lblTotalTime);
             _statsPanel.Controls.Add(_statsFlowPanel);
+
+            _statsPanel.Controls.Add(_btnPause);
             _statsPanel.Controls.Add(_btnStop);
+
+            _btnPause.BringToFront();
+            _btnStop.BringToFront();
         }
 
         private void SetupFilterPanel()
@@ -121,7 +205,6 @@ namespace SharpSFV
 
             lvFiles.AllowColumnReorder = !_settings.LockColumns;
 
-            // Local helper to avoid conflict with class-level AddCol
             void AddColLocal(string text, int width, string tag)
             {
                 ColumnHeader ch = lvFiles.Columns.Add(text, width);
@@ -182,13 +265,11 @@ namespace SharpSFV
                 if (!isOnScreen) this.StartPosition = FormStartPosition.CenterScreen;
             }
 
-            // FIXED: Using correct View Menu references
             if (_menuViewTime != null) _menuViewTime.Checked = _settings.ShowTimeTab;
             if (_menuViewShowFullPaths != null) _menuViewShowFullPaths.Checked = _settings.ShowFullPaths;
 
             if (_menuOptionsFilter != null) _menuOptionsFilter.Checked = _settings.ShowFilterPanel;
 
-            // Apply Advanced Bar Settings
             if (_menuOptionsAdvanced != null) _menuOptionsAdvanced.Checked = _settings.ShowAdvancedBar;
             if (_advancedPanel != null) _advancedPanel.Visible = _settings.ShowAdvancedBar;
 

@@ -19,6 +19,17 @@ namespace SharpSFV
     {
         private async Task ProcessFileEntry(string fullPath, string baseDir, int originalIndex, ChannelWriter<FileJob> writer, List<int> uiBatch)
         {
+            // 1. Check Pause State (Block here if paused)
+            try
+            {
+                _pauseEvent.Wait(_cts?.Token ?? CancellationToken.None);
+            }
+            catch (OperationCanceledException) { return; }
+
+            // 2. Check Cancellation
+            if (_cts != null && _cts.IsCancellationRequested) return;
+
+            // 3. Advanced Filtering
             if (_settings.ShowAdvancedBar)
             {
                 string fileName = Path.GetFileName(fullPath);
@@ -114,15 +125,11 @@ namespace SharpSFV
 
         private void ThrottledUiUpdate(int current, int total, int ok, int bad, int missing)
         {
-            // 1. Basic modulo check to avoid hitting the timer too often
             if (current % 50 != 0 && total == -1) return;
 
-            // 2. Check time elapsed (100ms)
             long now = DateTime.UtcNow.Ticks;
             if (now - Interlocked.Read(ref _lastUiUpdateTick) < 1000000) return;
 
-            // 3. Drop-Frame Logic using Atomic Flag
-            // 0 = Free, 1 = Busy
             if (Interlocked.CompareExchange(ref _uiBusy, 1, 0) == 0)
             {
                 Interlocked.Exchange(ref _lastUiUpdateTick, now);
@@ -140,7 +147,6 @@ namespace SharpSFV
                     }
                     finally
                     {
-                        // Release lock
                         Interlocked.Exchange(ref _uiBusy, 0);
                     }
                 }));
@@ -150,18 +156,31 @@ namespace SharpSFV
         private void SetProcessingState(bool processing)
         {
             _isProcessing = processing;
-            if (_btnStop != null)
+
+            if (this.InvokeRequired)
             {
-                if (this.InvokeRequired) this.Invoke(new Action(() => _btnStop.Enabled = processing));
-                else _btnStop.Enabled = processing;
+                this.BeginInvoke(new Action(() => SetProcessingState(processing)));
+                return;
+            }
+
+            // Enable/Disable Control Buttons
+            if (_btnStop != null) _btnStop.Enabled = processing;
+
+            if (_btnPause != null)
+            {
+                _btnPause.Enabled = processing;
+                if (processing)
+                {
+                    _btnPause.Text = "Pause";
+                    _isPaused = false;
+                    _pauseEvent.Set(); // Ensure we start running
+                    SetProgressBarColor(Win32Storage.PBST_NORMAL); // Reset color to Green
+                }
             }
 
             if (processing && _lblTotalTime != null)
             {
-                if (this.InvokeRequired)
-                    this.BeginInvoke(new Action(() => _lblTotalTime.Text = ""));
-                else
-                    _lblTotalTime.Text = "";
+                _lblTotalTime.Text = "";
             }
         }
 
@@ -175,7 +194,7 @@ namespace SharpSFV
                 else SystemSounds.Asterisk.Play();
             }
 
-            SetProcessingState(false);
+            SetProcessingState(false); // Disables buttons
 
             this.Invoke(new Action(() =>
             {
@@ -183,6 +202,14 @@ namespace SharpSFV
 
                 UpdateStats(completed, _fileStore.Count, ok, bad, missing);
                 progressBarTotal.Value = Math.Min(completed, progressBarTotal.Maximum);
+
+                // Set Bar Color on Completion
+                if (bad > 0 || missing > 0)
+                    SetProgressBarColor(Win32Storage.PBST_ERROR); // Red
+                else if (isCancelled)
+                    SetProgressBarColor(Win32Storage.PBST_PAUSED); // Yellow/Orange
+                else
+                    SetProgressBarColor(Win32Storage.PBST_NORMAL); // Green
 
                 if (verifyMode)
                 {

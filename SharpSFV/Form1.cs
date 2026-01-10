@@ -1,4 +1,5 @@
 using SharpSFV.Models;
+using SharpSFV.Interop;
 using System;
 using System.Collections.Generic;
 using System.Drawing;
@@ -16,8 +17,12 @@ namespace SharpSFV
         private AppSettings _settings;
         private bool _skipSaveOnClose = false;
 
-        // NEW: Atomic flag for UI Throttling (0 = Free, 1 = Busy)
+        // UI Throttling
         private int _uiBusy = 0;
+
+        // PAUSE / RESUME LOGIC
+        private ManualResetEventSlim _pauseEvent = new ManualResetEventSlim(true);
+        private bool _isPaused = false;
 
         // Standard File Store (SoA)
         private FileStore _fileStore = new FileStore();
@@ -30,7 +35,7 @@ namespace SharpSFV
         // Holds indices pointing to _fileStore for the Virtual ListView
         private List<int> _displayIndices = new List<int>();
 
-        // Sorter now compares integers (indices) via the Store
+        // Sorter
         private FileListSorter _listSorter;
 
         // UI Constraints
@@ -61,6 +66,10 @@ namespace SharpSFV
         private Panel? _statsPanel;
         private Panel? _filterPanel;
 
+        // NEW: Comments Panel
+        private Panel? _commentsPanel;
+        private TextBox? _txtComments;
+
         // Advanced Options Bar Controls
         private Panel? _advancedPanel;
         private TextBox? _txtPathPrefix;
@@ -75,7 +84,10 @@ namespace SharpSFV
         private Label? _lblStatsOK;
         private Label? _lblStatsBad;
         private Label? _lblStatsMissing;
+
+        // Control Buttons
         private Button? _btnStop;
+        private Button? _btnPause;
 
         // Active Jobs Controls
         private ListView? _lvActiveJobs;
@@ -166,6 +178,7 @@ namespace SharpSFV
             SetupStatsPanel();
             SetupFilterPanel();
             SetupAdvancedPanel();
+            SetupCommentsPanel(); // NEW
             SetupDragDrop();
             SetupActiveJobsPanel();
 
@@ -194,6 +207,7 @@ namespace SharpSFV
         private void Form1_FormClosing(object? sender, FormClosingEventArgs e)
         {
             _cts?.Cancel();
+            _pauseEvent?.Dispose();
 
             if (_skipSaveOnClose) return;
 
@@ -225,6 +239,11 @@ namespace SharpSFV
             _filterDebounceTimer?.Dispose();
 
             StringPool.Clear();
+        }
+
+        private void SetProgressBarColor(int state)
+        {
+            Win32Storage.SetProgressBarState(progressBarTotal, state);
         }
 
         // --- JOB LOGIC ---
@@ -300,6 +319,9 @@ namespace SharpSFV
                 if (_filterPanel != null) _filterPanel.Visible = false;
                 if (_advancedPanel != null) _advancedPanel.Visible = false;
 
+                // Hide Comments in Job Mode
+                if (_commentsPanel != null) _commentsPanel.Visible = false;
+
                 lvFiles.VirtualListSize = _jobStore.Count;
                 this.Text = "SharpSFV - Job Queue";
 
@@ -310,6 +332,10 @@ namespace SharpSFV
                 SetupUIForMode("Creation");
                 if (_settings.ShowFilterPanel && _filterPanel != null) _filterPanel.Visible = true;
                 if (_settings.ShowAdvancedBar && _advancedPanel != null) _advancedPanel.Visible = true;
+
+                // Comments visibility is determined by content, will be set during Verification
+                if (_commentsPanel != null && _txtComments != null)
+                    _commentsPanel.Visible = !string.IsNullOrWhiteSpace(_txtComments.Text);
 
                 lvFiles.VirtualListSize = _displayIndices.Count;
                 SetAlgorithm(_currentHashType);

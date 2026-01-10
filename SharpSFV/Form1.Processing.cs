@@ -10,6 +10,7 @@ using System.Threading;
 using System.Threading.Channels;
 using System.Threading.Tasks;
 using System.Windows.Forms;
+using System.Text; // Required for StringBuilder
 using System.Buffers;
 using SharpSFV.Interop;
 using SharpSFV.Models;
@@ -24,15 +25,27 @@ namespace SharpSFV
         {
             SetProcessingState(true);
 
+            // Standard Mode Setup
             SetupUIForMode("Creation");
+
+            // Hide comments in Creation mode
+            if (_commentsPanel != null) _commentsPanel.Visible = false;
+
             _fileStore.Clear();
             _displayIndices.Clear();
             UpdateDisplayList();
 
+            // Determine Processing Mode
             bool isHDD = false;
-            if (_settings.ProcessingMode == ProcessingMode.HDD) isHDD = true;
-            else if (_settings.ProcessingMode == ProcessingMode.SSD) isHDD = false;
-            else
+            if (_settings.ProcessingMode == ProcessingMode.HDD)
+            {
+                isHDD = true;
+            }
+            else if (_settings.ProcessingMode == ProcessingMode.SSD)
+            {
+                isHDD = false;
+            }
+            else // Auto
             {
                 if (paths.Length > 0)
                 {
@@ -45,6 +58,7 @@ namespace SharpSFV
 
             Stopwatch globalSw = Stopwatch.StartNew();
 
+            // Execute Engine with UI updates ENABLED (true)
             int completed = await ExecuteHashingEngine(paths, baseDirectory, isHDD, true, (curr, total, ok, bad) =>
             {
                 ThrottledUiUpdate(curr, total, ok, 0, bad);
@@ -66,6 +80,7 @@ namespace SharpSFV
                 {
                     int currentJobIdx = -1;
 
+                    // FIFO: Find next Queued job
                     for (int i = 0; i < _jobStore.Count; i++)
                     {
                         if (_jobStore.Statuses[i] == JobStatus.Queued)
@@ -79,6 +94,7 @@ namespace SharpSFV
 
                     _jobStore.UpdateStatus(currentJobIdx, JobStatus.InProgress);
 
+                    // Update Stats (One-off, no throttling needed for status change)
                     this.BeginInvoke(new Action(() => {
                         lvFiles.Invalidate();
                         UpdateJobStats();
@@ -89,10 +105,17 @@ namespace SharpSFV
                     int jobId = _jobStore.Ids[currentJobIdx];
                     string jobName = _jobStore.Names[currentJobIdx];
 
+                    // Determine Processing Mode for this Job
                     bool isHDD = false;
-                    if (_settings.ProcessingMode == ProcessingMode.HDD) isHDD = true;
-                    else if (_settings.ProcessingMode == ProcessingMode.SSD) isHDD = false;
-                    else
+                    if (_settings.ProcessingMode == ProcessingMode.HDD)
+                    {
+                        isHDD = true;
+                    }
+                    else if (_settings.ProcessingMode == ProcessingMode.SSD)
+                    {
+                        isHDD = false;
+                    }
+                    else // Auto
                     {
                         if (inputs.Length > 0)
                         {
@@ -105,6 +128,7 @@ namespace SharpSFV
                     _fileStore.Clear();
                     _displayIndices.Clear();
 
+                    // Execute Hashing
                     await ExecuteHashingEngine(inputs, rootPath, isHDD, false, (curr, total, ok, bad) =>
                     {
                         if (total > 0)
@@ -113,34 +137,45 @@ namespace SharpSFV
                             _jobStore.UpdateProgress(currentJobIdx, pct);
                         }
 
-                        // Drop-frame throttling for Job Mode
+                        // --- OPTIMIZATION: Drop-Frame UI Throttling ---
                         long now = DateTime.UtcNow.Ticks;
                         if (now - Interlocked.Read(ref _lastUiUpdateTick) < 1000000) return;
 
                         if (Interlocked.CompareExchange(ref _uiBusy, 1, 0) == 0)
                         {
                             Interlocked.Exchange(ref _lastUiUpdateTick, now);
+
                             this.BeginInvoke(new Action(() =>
                             {
-                                try { lvFiles.Invalidate(); }
-                                finally { Interlocked.Exchange(ref _uiBusy, 0); }
+                                try
+                                {
+                                    lvFiles.Invalidate();
+                                }
+                                finally
+                                {
+                                    Interlocked.Exchange(ref _uiBusy, 0);
+                                }
                             }));
                         }
                     });
 
                     _isProcessing = false;
 
+                    // Generate Filename
                     string algoExt = GetExtensionForAlgo(_currentHashType);
                     string safeRootName = string.Join("_", jobName.Split(Path.GetInvalidFileNameChars()));
                     string fileName = $"{jobId}.{safeRootName}{algoExt}";
                     string fullSavePath = Path.Combine(rootPath, fileName);
 
+                    // Save
                     bool hasErrors = SaveChecksumFileForJob(fullSavePath);
 
+                    // Finalize Job
                     JobStatus finalStatus = hasErrors ? JobStatus.Error : JobStatus.Done;
                     _jobStore.UpdateStatus(currentJobIdx, finalStatus, fullSavePath);
                     _jobStore.UpdateProgress(currentJobIdx, 100.0);
 
+                    // Clean Memory
                     _fileStore.Clear();
                     GC.Collect();
 
@@ -156,7 +191,7 @@ namespace SharpSFV
             }
         }
 
-        // --- SHARED HASHING ENGINE (CREATION ONLY) ---
+        // --- SHARED HASHING ENGINE ---
         private async Task<int> ExecuteHashingEngine(string[] paths, string baseDirectory, bool isHDD, bool updateFileList, Action<int, int, int, int> progressCallback)
         {
             _cts = new CancellationTokenSource();
@@ -187,6 +222,7 @@ namespace SharpSFV
                     void FlushUiBatch()
                     {
                         if (uiBatch.Count == 0 || !updateFileList) return;
+
                         var snapshot = uiBatch.ToList();
                         uiBatch.Clear();
 
@@ -207,6 +243,7 @@ namespace SharpSFV
                     foreach (string path in paths)
                     {
                         if (_cts.Token.IsCancellationRequested) break;
+                        try { _pauseEvent.Wait(_cts.Token); } catch { break; }
 
                         if (File.Exists(path))
                         {
@@ -215,6 +252,7 @@ namespace SharpSFV
                         else if (Directory.Exists(path))
                         {
                             bool recursive = _settings.ShowAdvancedBar ? _settings.ScanRecursive : true;
+
                             var opts = new EnumerationOptions
                             {
                                 IgnoreInaccessible = true,
@@ -226,8 +264,11 @@ namespace SharpSFV
                                 foreach (string file in Directory.EnumerateFiles(path, "*", opts))
                                 {
                                     if (_cts.Token.IsCancellationRequested) break;
+                                    try { _pauseEvent.Wait(_cts.Token); } catch { break; }
+
                                     await ProcessFileEntry(file, pooledBase, originalIndex++, channel.Writer, uiBatch);
 
+                                    // Periodic Flush
                                     if (updateFileList && (uiBatch.Count >= 2000 || (DateTime.UtcNow.Ticks - lastBatchTime > 2500000)))
                                     {
                                         Interlocked.Exchange(ref totalFilesDiscovered, originalIndex);
@@ -266,6 +307,10 @@ namespace SharpSFV
                         {
                             while (channel.Reader.TryRead(out FileJob job))
                             {
+                                // --- CHECK PAUSE & CANCEL ---
+                                try { _pauseEvent.Wait(_cts.Token); }
+                                catch (OperationCanceledException) { return; }
+
                                 if (_cts.Token.IsCancellationRequested) return;
 
                                 long startTick = Stopwatch.GetTimestamp();
@@ -327,6 +372,8 @@ namespace SharpSFV
                                 _fileStore.SetResult(job.Index, hashBytes, timeStr, status);
 
                                 int currentCompleted = Interlocked.Increment(ref completed);
+
+                                // Pass current 'totalFilesDiscovered' (might be updating while producer runs)
                                 progressCallback(currentCompleted, totalFilesDiscovered, okCount, errorCount);
                             }
                         }
@@ -346,6 +393,56 @@ namespace SharpSFV
             return completed;
         }
 
+        private bool SaveChecksumFileForJob(string fullPath)
+        {
+            try
+            {
+                using (StreamWriter sw = new StreamWriter(fullPath))
+                {
+                    sw.WriteLine($"; Generated by SharpSFV (Job Mode)");
+                    sw.WriteLine($"; Algorithm: {_currentHashType}");
+
+                    int errorCount = 0;
+                    for (int i = 0; i < _fileStore.Count; i++)
+                    {
+                        if (_fileStore.IsSummaryRows[i]) continue;
+                        ItemStatus status = _fileStore.Statuses[i];
+                        if (status == ItemStatus.Error || status == ItemStatus.Bad) errorCount++;
+
+                        string hash = _fileStore.GetCalculatedHashString(i);
+                        if (!hash.Contains("...") && status == ItemStatus.OK && !string.IsNullOrEmpty(hash))
+                        {
+                            string fileFullPath = _fileStore.GetFullPath(i);
+                            string pathToWrite;
+                            try { pathToWrite = Path.GetRelativePath(Path.GetDirectoryName(fullPath)!, fileFullPath); }
+                            catch { pathToWrite = fileFullPath; }
+
+                            if (_settings.ShowAdvancedBar && !string.IsNullOrEmpty(_settings.PathPrefix))
+                            {
+                                pathToWrite = Path.Combine(_settings.PathPrefix, pathToWrite);
+                            }
+
+                            sw.WriteLine($"{hash} *{pathToWrite}");
+                        }
+                    }
+                    return errorCount > 0;
+                }
+            }
+            catch { return true; }
+        }
+
+        private string GetExtensionForAlgo(HashType type)
+        {
+            return type switch
+            {
+                HashType.Crc32 => ".sfv",
+                HashType.MD5 => ".md5",
+                HashType.SHA1 => ".sha1",
+                HashType.SHA256 => ".sha256",
+                _ => ".xxh3"
+            };
+        }
+
         private async Task RunVerification(string checkFilePath)
         {
             SetProcessingState(true);
@@ -359,7 +456,6 @@ namespace SharpSFV
             string baseFolder = Path.GetDirectoryName(checkFilePath) ?? "";
             string ext = Path.GetExtension(checkFilePath).ToLowerInvariant();
 
-            // Set Algo based on file extension
             HashType verificationAlgo = _currentHashType;
             if (ext == ".sfv") verificationAlgo = HashType.Crc32;
             else if (ext == ".md5") verificationAlgo = HashType.MD5;
@@ -370,11 +466,24 @@ namespace SharpSFV
             SetAlgorithm(verificationAlgo);
 
             var parsedLines = new List<(byte[] ExpectedHash, string Filename)>();
+
+            // --- NEW: Comment Parser ---
+            StringBuilder sbComments = new StringBuilder();
+
             try
             {
                 foreach (var line in await File.ReadAllLinesAsync(checkFilePath))
                 {
-                    if (string.IsNullOrWhiteSpace(line) || line.TrimStart().StartsWith(";")) continue;
+                    string trimmed = line.TrimStart();
+
+                    // Detect Comments starting with //
+                    if (trimmed.StartsWith("//"))
+                    {
+                        sbComments.AppendLine(trimmed.Substring(2).Trim());
+                        continue;
+                    }
+
+                    if (string.IsNullOrWhiteSpace(line) || trimmed.StartsWith(";")) continue;
 
                     string expectedHashStr = "", filename = "";
                     Match matchA = Regex.Match(line, @"^\s*([0-9a-fA-F]+)\s+\*?(.*?)\s*$");
@@ -391,40 +500,41 @@ namespace SharpSFV
             }
             catch (Exception ex) { MessageBox.Show("Error parsing: " + ex.Message); SetProcessingState(false); return; }
 
+            // --- DISPLAY COMMENTS ---
+            string commentText = sbComments.ToString();
+            if (_txtComments != null) _txtComments.Text = commentText;
+            if (_commentsPanel != null) _commentsPanel.Visible = !string.IsNullOrWhiteSpace(commentText);
+
             _fileStore.Clear();
             _displayIndices.Clear();
 
-            int missingCount = 0; // Updated dynamically by workers now
+            int missingCount = 0;
             int loadIndex = 0;
 
             string pooledBase = StringPool.GetOrAdd(baseFolder);
 
-            // --- OPTIMIZATION: NO File.Exists here! Pure memory load ---
             foreach (var entry in parsedLines)
             {
                 string pooledName = StringPool.GetOrAdd(Path.GetFileName(entry.Filename));
                 string pooledRel = StringPool.GetOrAdd(entry.Filename);
 
-                // Set initial status to QUEUED. Do NOT check disk yet.
                 int idx = _fileStore.Add(pooledName, pooledRel, pooledBase, loadIndex++, ItemStatus.Queued, entry.ExpectedHash);
                 _displayIndices.Add(idx);
             }
 
-            // UI Refresh - User sees list instantly
             _displayIndices.Sort((a, b) => string.Compare(_fileStore.GetFullPath(a), _fileStore.GetFullPath(b), StringComparison.OrdinalIgnoreCase));
             UpdateDisplayList();
-            UpdateStats(0, _fileStore.Count, 0, 0, 0); // Zero stats initially
+
+            UpdateStats(0, _fileStore.Count, 0, 0, missingCount);
             progressBarTotal.Maximum = _fileStore.Count;
 
             int completed = 0, okCount = 0, badCount = 0;
 
-            // Determine Processing Mode (Use Auto logic if needed, but defer heavy checks)
             bool isHDD = false;
             if (_settings.ProcessingMode == ProcessingMode.HDD) isHDD = true;
             else if (_settings.ProcessingMode == ProcessingMode.SSD) isHDD = false;
             else
             {
-                // Simple heuristic: Check the root drive type only once
                 string root = Path.GetPathRoot(baseFolder) ?? "";
                 if (!string.IsNullOrEmpty(root)) isHDD = DriveDetector.IsRotational(root);
             }
@@ -435,7 +545,6 @@ namespace SharpSFV
             Stopwatch globalSw = Stopwatch.StartNew();
             var channel = Channel.CreateBounded<FileJob>(50000);
 
-            // --- MODIFIED PRODUCER: Checks Existence Here ---
             var producer = Task.Run(async () =>
             {
                 try
@@ -443,26 +552,21 @@ namespace SharpSFV
                     foreach (int idx in _displayIndices)
                     {
                         if (_cts.Token.IsCancellationRequested) break;
+                        try { _pauseEvent.Wait(_cts.Token); } catch { break; }
 
                         string fullPath = _fileStore.GetFullPath(idx);
                         byte[]? expected = _fileStore.ExpectedHashes[idx];
 
-                        // Perform File System Check on Background Thread
                         if (File.Exists(fullPath))
                         {
-                            // File exists -> Send to Hasher
-                            // Update Status to Pending (Processing)
                             _fileStore.Statuses[idx] = ItemStatus.Pending;
                             await channel.Writer.WriteAsync(new FileJob(idx, fullPath, expected), _cts.Token);
                         }
                         else
                         {
-                            // File Missing -> Mark immediately
                             _fileStore.Statuses[idx] = ItemStatus.Missing;
                             Interlocked.Increment(ref missingCount);
                             Interlocked.Increment(ref completed);
-
-                            // Trigger UI update for the missing file
                             ThrottledUiUpdate(completed, -1, okCount, badCount, missingCount);
                         }
                     }
@@ -488,6 +592,9 @@ namespace SharpSFV
                         {
                             while (channel.Reader.TryRead(out FileJob job))
                             {
+                                try { _pauseEvent.Wait(_cts.Token); }
+                                catch (OperationCanceledException) { return; }
+
                                 if (_cts.Token.IsCancellationRequested) return;
 
                                 long startTick = Stopwatch.GetTimestamp();
@@ -509,10 +616,8 @@ namespace SharpSFV
                                             {
                                                 AddActiveJob(job.Index, Path.GetFileName(job.FullPath));
                                                 var progress = new Progress<double>(p => UpdateActiveJob(job.Index, p));
-                                                using (var ps = new ProgressStream(fs, progress, len))
-                                                {
-                                                    calculatedHash = HashHelper.ComputeHashSync(ps, verificationAlgo, sharedBuffer, reusedAlgo);
-                                                }
+                                                var streamToHash = new ProgressStream(fs, progress, len);
+                                                calculatedHash = HashHelper.ComputeHashSync(streamToHash, verificationAlgo, sharedBuffer, reusedAlgo);
                                                 RemoveActiveJob(job.Index);
                                             }
                                         }
@@ -577,57 +682,6 @@ namespace SharpSFV
             GCSettings.LatencyMode = oldMode;
             globalSw.Stop();
             HandleCompletion(completed, okCount, badCount, missingCount, globalSw, true);
-        }
-
-        // Helpers...
-        private bool SaveChecksumFileForJob(string fullPath)
-        {
-            try
-            {
-                using (StreamWriter sw = new StreamWriter(fullPath))
-                {
-                    sw.WriteLine($"; Generated by SharpSFV (Job Mode)");
-                    sw.WriteLine($"; Algorithm: {_currentHashType}");
-
-                    int errorCount = 0;
-                    for (int i = 0; i < _fileStore.Count; i++)
-                    {
-                        if (_fileStore.IsSummaryRows[i]) continue;
-                        ItemStatus status = _fileStore.Statuses[i];
-                        if (status == ItemStatus.Error || status == ItemStatus.Bad) errorCount++;
-
-                        string hash = _fileStore.GetCalculatedHashString(i);
-                        if (!hash.Contains("...") && status == ItemStatus.OK && !string.IsNullOrEmpty(hash))
-                        {
-                            string fileFullPath = _fileStore.GetFullPath(i);
-                            string pathToWrite;
-                            try { pathToWrite = Path.GetRelativePath(Path.GetDirectoryName(fullPath)!, fileFullPath); }
-                            catch { pathToWrite = fileFullPath; }
-
-                            if (_settings.ShowAdvancedBar && !string.IsNullOrEmpty(_settings.PathPrefix))
-                            {
-                                pathToWrite = Path.Combine(_settings.PathPrefix, pathToWrite);
-                            }
-
-                            sw.WriteLine($"{hash} *{pathToWrite}");
-                        }
-                    }
-                    return errorCount > 0;
-                }
-            }
-            catch { return true; }
-        }
-
-        private string GetExtensionForAlgo(HashType type)
-        {
-            return type switch
-            {
-                HashType.Crc32 => ".sfv",
-                HashType.MD5 => ".md5",
-                HashType.SHA1 => ".sha1",
-                HashType.SHA256 => ".sha256",
-                _ => ".xxh3"
-            };
         }
     }
 }

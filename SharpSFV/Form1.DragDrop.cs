@@ -32,7 +32,23 @@ namespace SharpSFV
             string[]? paths = (string[]?)e.Data!.GetData(DataFormats.FileDrop);
             if (paths != null && paths.Length > 0)
             {
-                await HandleDroppedPaths(paths);
+                // CRITICAL FIX: Catch TaskCanceledException here.
+                // When "Stop" is clicked, the Cancellation Token throws an exception 
+                // back up the stack. Since this is an 'async void' event handler, 
+                // an unhandled exception here crashes the app immediately.
+                try
+                {
+                    await HandleDroppedPaths(paths);
+                }
+                catch (OperationCanceledException)
+                {
+                    // Intentional cancellation, ignore.
+                }
+                catch (Exception ex)
+                {
+                    MessageBox.Show($"An error occurred while processing files:\n{ex.Message}",
+                        "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                }
             }
         }
 
