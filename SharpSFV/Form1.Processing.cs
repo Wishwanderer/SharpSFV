@@ -90,7 +90,10 @@ namespace SharpSFV
                         }
                     }
 
-                    if (currentJobIdx == -1) break;
+                    if (currentJobIdx == -1) break; // No more jobs
+
+                    // FIX: Ensure UI controls (Pause/Stop) are enabled when we find work
+                    if (!_isProcessing) SetProcessingState(true);
 
                     _jobStore.UpdateStatus(currentJobIdx, JobStatus.InProgress);
 
@@ -124,11 +127,11 @@ namespace SharpSFV
                         }
                     }
 
-                    _isProcessing = true;
                     _fileStore.Clear();
                     _displayIndices.Clear();
 
                     // Execute Hashing
+                    // Note: updateFileList is 'false' for Job Mode to save memory/cpu
                     await ExecuteHashingEngine(inputs, rootPath, isHDD, false, (curr, total, ok, bad) =>
                     {
                         if (total > 0)
@@ -138,8 +141,8 @@ namespace SharpSFV
                         }
 
                         // --- OPTIMIZATION: Drop-Frame UI Throttling ---
-                        long now = DateTime.UtcNow.Ticks;
-                        if (now - Interlocked.Read(ref _lastUiUpdateTick) < 1000000) return;
+                        long now = Environment.TickCount64;
+                        if (now - Interlocked.Read(ref _lastUiUpdateTick) < 100) return;
 
                         if (Interlocked.CompareExchange(ref _uiBusy, 1, 0) == 0)
                         {
@@ -158,8 +161,6 @@ namespace SharpSFV
                             }));
                         }
                     });
-
-                    _isProcessing = false;
 
                     // Generate Filename
                     string algoExt = GetExtensionForAlgo(_currentHashType);
@@ -187,7 +188,61 @@ namespace SharpSFV
             }
             finally
             {
+                // FIX: Disable UI controls only when the entire queue is finished/stopped
+                SetProcessingState(false);
                 _isJobQueueRunning = false;
+            }
+        }
+
+        // --- UI THROTTLING LOGIC ---
+
+        private void ThrottledUiUpdate(int current, int total, int ok, int bad, int missing)
+        {
+            // 1. Force update if complete (100%)
+            // If total is known (>0) and current == total, we always let it through.
+            bool isComplete = (total > 0 && current >= total);
+
+            if (!isComplete)
+            {
+                // 2. Pure Time-Based Check (100ms / 10 FPS)
+                // We use Environment.TickCount64 for low-overhead millisecond timing.
+                long now = Environment.TickCount64;
+                long last = Interlocked.Read(ref _lastUiUpdateTick);
+
+                if (now - last < 100) return;
+            }
+
+            // 3. Drop-Frame Mechanism
+            // If the UI thread is still painting the previous frame (_uiBusy == 1),
+            // we skip this update request to prevent message pump saturation.
+            if (Interlocked.CompareExchange(ref _uiBusy, 1, 0) == 0)
+            {
+                Interlocked.Exchange(ref _lastUiUpdateTick, Environment.TickCount64);
+
+                this.BeginInvoke(new Action(() =>
+                {
+                    try
+                    {
+                        // Safely handle the progress bar max
+                        int safeTotal = (total <= 0) ? _fileStore.Count : total;
+                        if (safeTotal <= 0) safeTotal = 1; // Prevent div/0 visuals
+
+                        if (progressBarTotal.Maximum != safeTotal)
+                            progressBarTotal.Maximum = safeTotal;
+
+                        // Ensure Value doesn't exceed Maximum
+                        progressBarTotal.Value = Math.Min(current, safeTotal);
+
+                        UpdateStats(current, safeTotal, ok, bad, missing);
+
+                        // IMPORTANT: Invalidate the ListView to repaint rows (Colors/Status text)
+                        lvFiles.Invalidate();
+                    }
+                    finally
+                    {
+                        Interlocked.Exchange(ref _uiBusy, 0);
+                    }
+                }));
             }
         }
 
@@ -268,10 +323,13 @@ namespace SharpSFV
 
                                     await ProcessFileEntry(file, pooledBase, originalIndex++, channel.Writer, uiBatch);
 
-                                    // Periodic Flush
+                                    // Periodic Flush Logic
+                                    // 1. Always update the atomic total counter (FIX: This runs even if updateFileList is false)
+                                    Interlocked.Exchange(ref totalFilesDiscovered, originalIndex);
+
+                                    // 2. Conditionally update UI list
                                     if (updateFileList && (uiBatch.Count >= 2000 || (DateTime.UtcNow.Ticks - lastBatchTime > 2500000)))
                                     {
-                                        Interlocked.Exchange(ref totalFilesDiscovered, originalIndex);
                                         FlushUiBatch();
                                     }
                                 }
@@ -280,6 +338,7 @@ namespace SharpSFV
                         }
                     }
 
+                    // Final flush
                     Interlocked.Exchange(ref totalFilesDiscovered, originalIndex);
                     if (updateFileList) FlushUiBatch();
                 }
@@ -399,8 +458,11 @@ namespace SharpSFV
             {
                 using (StreamWriter sw = new StreamWriter(fullPath))
                 {
-                    sw.WriteLine($"; Generated by SharpSFV (Job Mode)");
-                    sw.WriteLine($"; Algorithm: {_currentHashType}");
+                    if (_settings.EnableChecksumComments)
+                    {
+                        sw.WriteLine($"; Generated by SharpSFV (Job Mode)");
+                        sw.WriteLine($"; Algorithm: {_currentHashType}");
+                    }
 
                     int errorCount = 0;
                     for (int i = 0; i < _fileStore.Count; i++)
@@ -461,7 +523,7 @@ namespace SharpSFV
             else if (ext == ".md5") verificationAlgo = HashType.MD5;
             else if (ext == ".sha1") verificationAlgo = HashType.SHA1;
             else if (ext == ".sha256") verificationAlgo = HashType.SHA256;
-            else if (ext == ".xxh3") verificationAlgo = HashType.XxHash3;
+            else if (ext == ".xxh3") verificationAlgo = HashType.XXHASH3;
 
             SetAlgorithm(verificationAlgo);
 

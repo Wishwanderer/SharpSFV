@@ -123,36 +123,6 @@ namespace SharpSFV
             catch { return true; }
         }
 
-        private void ThrottledUiUpdate(int current, int total, int ok, int bad, int missing)
-        {
-            if (current % 50 != 0 && total == -1) return;
-
-            long now = DateTime.UtcNow.Ticks;
-            if (now - Interlocked.Read(ref _lastUiUpdateTick) < 1000000) return;
-
-            if (Interlocked.CompareExchange(ref _uiBusy, 1, 0) == 0)
-            {
-                Interlocked.Exchange(ref _lastUiUpdateTick, now);
-
-                this.BeginInvoke(new Action(() =>
-                {
-                    try
-                    {
-                        int safeTotal = (total <= 0) ? _fileStore.Count : total;
-                        if (progressBarTotal.Maximum > 0)
-                            progressBarTotal.Value = Math.Min(current, progressBarTotal.Maximum);
-
-                        UpdateStats(current, safeTotal, ok, bad, missing);
-                        lvFiles.Invalidate();
-                    }
-                    finally
-                    {
-                        Interlocked.Exchange(ref _uiBusy, 0);
-                    }
-                }));
-            }
-        }
-
         private void SetProcessingState(bool processing)
         {
             _isProcessing = processing;
@@ -201,15 +171,18 @@ namespace SharpSFV
                 RecalculateColumnWidths();
 
                 UpdateStats(completed, _fileStore.Count, ok, bad, missing);
-                progressBarTotal.Value = Math.Min(completed, progressBarTotal.Maximum);
+                if (progressBarTotal != null)
+                {
+                    progressBarTotal.Value = Math.Min(completed, progressBarTotal.Maximum);
 
-                // Set Bar Color on Completion
-                if (bad > 0 || missing > 0)
-                    SetProgressBarColor(Win32Storage.PBST_ERROR); // Red
-                else if (isCancelled)
-                    SetProgressBarColor(Win32Storage.PBST_PAUSED); // Yellow/Orange
-                else
-                    SetProgressBarColor(Win32Storage.PBST_NORMAL); // Green
+                    // Set Bar Color on Completion
+                    if (bad > 0 || missing > 0)
+                        SetProgressBarColor(Win32Storage.PBST_ERROR); // Red
+                    else if (isCancelled)
+                        SetProgressBarColor(Win32Storage.PBST_PAUSED); // Yellow/Orange
+                    else
+                        SetProgressBarColor(Win32Storage.PBST_NORMAL); // Green
+                }
 
                 if (verifyMode)
                 {

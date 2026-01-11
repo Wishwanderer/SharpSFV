@@ -2,6 +2,11 @@
 using System.Drawing;
 using System.Windows.Forms;
 using System.IO;
+using System.Text;
+using System.Linq;
+using System.Collections.Generic;
+using System.Diagnostics;
+using SharpSFV.Models;
 
 namespace SharpSFV
 {
@@ -61,7 +66,7 @@ namespace SharpSFV
             _menuPathAbsolute = new ToolStripMenuItem("Absolute Paths", null, (s, e) => SetPathStorageMode(PathStorageMode.Absolute));
             menuPathStorage.DropDownItems.AddRange(new ToolStripItem[] { _menuPathRelative, _menuPathAbsolute });
 
-            // NEW: Advanced Bar Toggle
+            // Advanced Bar Toggle
             _menuOptionsAdvanced = new ToolStripMenuItem("Show Advanced Options Bar", null, (s, e) => ToggleAdvancedBar()) { CheckOnClick = true };
 
             _menuOptionsFilter = new ToolStripMenuItem("Show Search/Filter Bar", null, (s, e) => ToggleFilterPanel()) { CheckOnClick = true };
@@ -78,15 +83,15 @@ namespace SharpSFV
             _menuGenBadFiles = new ToolStripMenuItem("Generate 'Delete BAD Files' Script", null, (s, e) => PerformBatchExport()) { Enabled = false };
 
             var menuAlgo = new ToolStripMenuItem("Default Hashing Algorithm");
-            AddAlgoMenuItem(menuAlgo, "xxHash-3 (128-bit)", HashType.XxHash3);
-            AddAlgoMenuItem(menuAlgo, "CRC-32 (SFV)", HashType.Crc32);
+            AddAlgoMenuItem(menuAlgo, "xxHash-3 (128-bit)", HashType.XXHASH3);
+            AddAlgoMenuItem(menuAlgo, "Crc32 (SFV)", HashType.Crc32);
             AddAlgoMenuItem(menuAlgo, "MD5", HashType.MD5);
             AddAlgoMenuItem(menuAlgo, "SHA-1", HashType.SHA1);
             AddAlgoMenuItem(menuAlgo, "SHA-256", HashType.SHA256);
 
             menuOptions.DropDownItems.AddRange(new ToolStripItem[] {
                 menuPathStorage,
-                _menuOptionsAdvanced, // Added here
+                _menuOptionsAdvanced,
                 _menuOptionsFilter,
                 menuProcMode,
                 menuAlgo,
@@ -170,8 +175,21 @@ namespace SharpSFV
         {
             _currentHashType = type;
             foreach (var kvp in _algoMenuItems) kvp.Value.Checked = (kvp.Key == type);
-            if (!_isProcessing && !_isJobMode)
-                this.Text = (_isVerificationMode) ? "SharpSFV - Verify" : $"SharpSFV - Create [{_currentHashType}]";
+            if (!_isProcessing)
+            {
+                if (_isJobMode)
+                {
+                    this.Text = $"SharpSFV - Job Queue [{_currentHashType}]";
+                }
+                else if (_isVerificationMode)
+                {
+                    this.Text = $"SharpSFV - Verify [{_currentHashType}]";
+                }
+                else
+                {
+                    this.Text = $"SharpSFV [{_currentHashType}]";
+                }
+            }
         }
 
         private void ToggleTimeColumn()

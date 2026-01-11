@@ -46,7 +46,7 @@ namespace SharpSFV
         // State Flags
         private bool _isProcessing = false;
         private bool _isVerificationMode = false;
-        private HashType _currentHashType = HashType.XxHash3;
+        private HashType _currentHashType = HashType.XXHASH3;
         private CancellationTokenSource? _cts;
 
         // Threading & UI Throttling
@@ -173,21 +173,15 @@ namespace SharpSFV
             this.FormClosing += Form1_FormClosing;
             this.Shown += Form1_Shown;
 
-            SetupCustomMenu();
+            // UI Setup methods are now in Form1.UI.Layout.cs
+            SetupLayout();
             SetupContextMenu();
-            SetupStatsPanel();
-            SetupFilterPanel();
-            SetupAdvancedPanel();
-            SetupCommentsPanel(); // NEW
             SetupDragDrop();
-            SetupActiveJobsPanel();
 
             ApplySettings();
-            SetupLayout();
 
-            SetupUIForMode("Creation");
-
-            this.Text = "SharpSFV";
+            // Initialize Title
+            SetAlgorithm(_currentHashType);
         }
 
         private void EnableDoubleBuffer(Control control)
@@ -258,129 +252,7 @@ namespace SharpSFV
             UpdateJobStats();
         }
 
-        private void UpdateJobStats()
-        {
-            if (!_isJobMode) return;
-
-            int done = 0;
-            int error = 0;
-            int inProgress = 0;
-
-            for (int i = 0; i < _jobStore.Count; i++)
-            {
-                switch (_jobStore.Statuses[i])
-                {
-                    case JobStatus.Done: done++; break;
-                    case JobStatus.Error: error++; break;
-                    case JobStatus.InProgress: inProgress++; break;
-                }
-            }
-
-            if (_lblProgress != null) _lblProgress.Text = $"Jobs Completed: {done} / {_jobStore.Count}";
-
-            if (_lblStatsOK != null)
-            {
-                _lblStatsOK.Text = $"DONE: {done}";
-                _lblStatsOK.ForeColor = ColGreenText;
-            }
-
-            if (_lblStatsBad != null)
-            {
-                _lblStatsBad.Text = $"ERROR: {error}";
-                _lblStatsBad.ForeColor = ColRedText;
-            }
-
-            if (_lblStatsMissing != null)
-            {
-                _lblStatsMissing.Text = $"IN PROGRESS: {inProgress}";
-                _lblStatsMissing.ForeColor = Color.Blue;
-            }
-        }
-
-        private void SetAppMode(bool jobMode)
-        {
-            if (_isJobMode == jobMode) return;
-            _isJobMode = jobMode;
-
-            if (_menuJobsEnable != null) _menuJobsEnable.Checked = _isJobMode;
-
-            lvFiles.BeginUpdate();
-            lvFiles.Columns.Clear();
-            _originalColWidths.Clear();
-
-            if (_isJobMode)
-            {
-                AddCol("Job Name", 250, "JobName");
-                AddCol("Root Path", 350, "RootPath");
-                AddCol("Progress", 100, "Progress");
-                AddCol("Status", 100, "Status");
-
-                if (_mainSplitter != null) _mainSplitter.Panel1Collapsed = true;
-                if (_filterPanel != null) _filterPanel.Visible = false;
-                if (_advancedPanel != null) _advancedPanel.Visible = false;
-
-                // Hide Comments in Job Mode
-                if (_commentsPanel != null) _commentsPanel.Visible = false;
-
-                lvFiles.VirtualListSize = _jobStore.Count;
-                this.Text = "SharpSFV - Job Queue";
-
-                UpdateJobStats();
-            }
-            else
-            {
-                SetupUIForMode("Creation");
-                if (_settings.ShowFilterPanel && _filterPanel != null) _filterPanel.Visible = true;
-                if (_settings.ShowAdvancedBar && _advancedPanel != null) _advancedPanel.Visible = true;
-
-                // Comments visibility is determined by content, will be set during Verification
-                if (_commentsPanel != null && _txtComments != null)
-                    _commentsPanel.Visible = !string.IsNullOrWhiteSpace(_txtComments.Text);
-
-                lvFiles.VirtualListSize = _displayIndices.Count;
-                SetAlgorithm(_currentHashType);
-
-                UpdateStats(0, 0, 0, 0, 0);
-            }
-
-            lvFiles.EndUpdate();
-            lvFiles.Invalidate();
-        }
-
-        private void UpdateStats(int current, int total, int ok, int bad, int missing)
-        {
-            if (_isJobMode) return;
-
-            if (_lblProgress != null)
-            {
-                if (total == 0 && current == 0) _lblProgress.Text = "Ready";
-                else _lblProgress.Text = $"Completed files: {current} / {total}";
-                _lblProgress.Update();
-            }
-
-            if (_lblStatsOK != null)
-            {
-                _lblStatsOK.Text = $"OK: {ok}";
-                _lblStatsOK.ForeColor = ColGreenText;
-            }
-            if (_lblStatsBad != null)
-            {
-                _lblStatsBad.Text = $"BAD: {bad}";
-                _lblStatsBad.ForeColor = ColRedText;
-            }
-            if (_lblStatsMissing != null)
-            {
-                _lblStatsMissing.Text = $"MISSING: {missing}";
-                _lblStatsMissing.ForeColor = ColYellowText;
-            }
-
-            if (_menuGenBadFiles != null)
-            {
-                _menuGenBadFiles.Enabled = (bad > 0);
-            }
-
-            _statsFlowPanel?.Update();
-        }
+        // NOTE: UpdateJobStats, SetAppMode, UpdateStats moved to Form1.UI.Layout.cs to avoid duplicates.
 
         private void AddCol(string text, int width, string tag)
         {

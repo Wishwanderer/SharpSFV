@@ -19,13 +19,14 @@ namespace SharpSFV
 
         // NEW: Advanced Bar Settings
         public bool ShowAdvancedBar { get; set; } = false;
+        public bool EnableChecksumComments { get; set; } = false; // Default: Disabled
         public string PathPrefix { get; set; } = "";
         public string IncludePattern { get; set; } = "";
         public string ExcludePattern { get; set; } = "";
         public bool ScanRecursive { get; set; } = true;
 
         public string CustomSignature { get; set; } = "L33T";
-        public HashType DefaultAlgo { get; set; } = HashType.XxHash3;
+        public HashType DefaultAlgo { get; set; } = HashType.XXHASH3;
 
         public Size WindowSize { get; set; } = new Size(800, 600);
         public Point WindowLocation { get; set; } = Point.Empty;
@@ -80,6 +81,7 @@ namespace SharpSFV
 
                     // Advanced Bar Loading
                     else if (key.Equals("ShowAdvancedBar", StringComparison.OrdinalIgnoreCase)) ShowAdvancedBar = (val == "1");
+                    else if (key.Equals("EnableChecksumComments", StringComparison.OrdinalIgnoreCase)) EnableChecksumComments = (val == "1");
                     else if (key.Equals("PathPrefix", StringComparison.OrdinalIgnoreCase)) PathPrefix = val;
                     else if (key.Equals("IncludePattern", StringComparison.OrdinalIgnoreCase)) IncludePattern = val;
                     else if (key.Equals("ExcludePattern", StringComparison.OrdinalIgnoreCase)) ExcludePattern = val;
@@ -175,6 +177,7 @@ namespace SharpSFV
 
                     // Advanced Bar Saving
                     sw.WriteLine($"ShowAdvancedBar={(ShowAdvancedBar ? "1" : "0")}");
+                    sw.WriteLine($"EnableChecksumComments={(EnableChecksumComments ? "1" : "0")}");
                     sw.WriteLine($"PathPrefix={PathPrefix}");
                     sw.WriteLine($"IncludePattern={IncludePattern}");
                     sw.WriteLine($"ExcludePattern={ExcludePattern}");

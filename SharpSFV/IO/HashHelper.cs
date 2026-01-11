@@ -19,7 +19,7 @@ namespace SharpSFV
             {
                 switch (type)
                 {
-                    case HashType.XxHash3:
+                    case HashType.XXHASH3:
                         var xx3 = new XxHash128();
                         while ((bytesRead = inputStream.Read(buffer, 0, buffer.Length)) > 0)
                         {
@@ -28,7 +28,8 @@ namespace SharpSFV
                         return xx3.GetCurrentHash();
 
                     case HashType.Crc32:
-                        var crc = new Crc32();
+                        // FIX: Explicitly specify System.IO.Hashing to avoid ambiguity with ARM Intrinsics
+                        var crc = new System.IO.Hashing.Crc32();
                         while ((bytesRead = inputStream.Read(buffer, 0, buffer.Length)) > 0)
                         {
                             crc.Append(new ReadOnlySpan<byte>(buffer, 0, bytesRead));
@@ -65,7 +66,7 @@ namespace SharpSFV
 
                 switch (type)
                 {
-                    case HashType.XxHash3:
+                    case HashType.XXHASH3:
                         var xx3 = new XxHash128();
                         while (position < fileLength)
                         {
@@ -77,7 +78,8 @@ namespace SharpSFV
                         return xx3.GetCurrentHash();
 
                     case HashType.Crc32:
-                        var crc = new Crc32();
+                        // FIX: Explicitly specify System.IO.Hashing to avoid ambiguity with ARM Intrinsics
+                        var crc = new System.IO.Hashing.Crc32();
                         while (position < fileLength)
                         {
                             bytesRead = RandomAccess.Read(handle, buffer, position);

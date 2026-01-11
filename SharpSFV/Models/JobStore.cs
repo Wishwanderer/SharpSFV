@@ -6,6 +6,7 @@ namespace SharpSFV.Models
     {
         Queued,
         InProgress,
+        Paused, // NEW: Added for Pause functionality
         Done,
         Error
     }
@@ -77,7 +78,7 @@ namespace SharpSFV.Models
                 int writeIndex = 0;
                 for (int readIndex = 0; readIndex < Count; readIndex++)
                 {
-                    // Keep item if it is NOT Done (Keep Queued, InProgress, Error)
+                    // Keep item if it is NOT Done (Keep Queued, InProgress, Paused, Error)
                     if (Statuses[readIndex] != JobStatus.Done)
                     {
                         if (writeIndex != readIndex)

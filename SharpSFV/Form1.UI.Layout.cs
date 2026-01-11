@@ -3,58 +3,57 @@ using System.Collections.Generic;
 using System.Drawing;
 using System.Linq;
 using System.Windows.Forms;
+using SharpSFV.Models;
+using SharpSFV.Interop;
 
 namespace SharpSFV
 {
     public partial class Form1
     {
+        private CheckBox? _chkComments; // Field for Comments Toggle
+
         private void SetupLayout()
         {
-            this.Controls.Clear();
+            // 1. Ensure all components are initialized
+            if (_mainSplitter == null || lvFiles == null) SetupActiveJobsPanel();
+            if (_menuStrip == null) SetupCustomMenu();
+            if (_statsPanel == null) SetupStatsPanel();
+            if (_filterPanel == null) SetupFilterPanel();
+            if (_advancedPanel == null) SetupAdvancedPanel();
+            if (_commentsPanel == null) SetupCommentsPanel();
 
+            this.Controls.Clear();
             this.MinimumSize = new Size(600, 400);
 
-            // 1. Configure Components
-
-            // Bottom Progress Bar
+            // 2. Configure Components
             Panel progressPanel = new Panel { Height = 25, Dock = DockStyle.Bottom, Padding = new Padding(2) };
-            progressBarTotal.Dock = DockStyle.Fill;
-            progressPanel.Controls.Add(progressBarTotal);
 
-            // List View
-            lvFiles.Dock = DockStyle.Fill;
-            lvFiles.Scrollable = true; // Ensure native scrollbars are enabled
+            if (progressBarTotal != null)
+            {
+                progressBarTotal.Dock = DockStyle.Fill;
+                progressPanel.Controls.Add(progressBarTotal);
+            }
 
-            // Main Splitter
+            if (lvFiles != null)
+            {
+                lvFiles.Dock = DockStyle.Fill;
+                lvFiles.Scrollable = true;
+            }
+
             if (_mainSplitter != null)
             {
                 _mainSplitter.Dock = DockStyle.Fill;
-                if (!_mainSplitter.Panel2.Controls.Contains(lvFiles))
+                if (lvFiles != null && !_mainSplitter.Panel2.Controls.Contains(lvFiles))
+                {
                     _mainSplitter.Panel2.Controls.Add(lvFiles);
+                }
             }
 
-            // 2. ADD CONTROLS TO FORM (Critical Z-Order Logic)
-            // Controls.Add() pushes existing controls to the BACK of the Z-Order.
-            // Layout Engine processes from Front (Index 0) to Back (Index N).
-            // High Priority Docks (Top/Bottom) must be at the Front.
-            // Low Priority Docks (Fill) must be at the Back.
+            // 3. Add Controls (Z-Order: Fill First, Top Last)
+            if (_mainSplitter != null) this.Controls.Add(_mainSplitter);
+            else if (lvFiles != null) this.Controls.Add(lvFiles);
 
-            // Step A: Add the FILL control FIRST (so it gets pushed to the very bottom/back)
-            if (_mainSplitter != null)
-            {
-                this.Controls.Add(_mainSplitter);
-            }
-            else
-            {
-                this.Controls.Add(lvFiles);
-            }
-
-            // Step B: Add the BOTTOM control (so it sits in front of Fill)
             this.Controls.Add(progressPanel);
-
-            // Step C: Add the TOP controls (Last added = Top of Z-Order = Highest Priority)
-            // Order: Filter -> Advanced -> Comments -> Stats -> Menu
-            // (Resulting Visual Stack: Menu on top, then Stats, etc.)
 
             if (_filterPanel != null) this.Controls.Add(_filterPanel);
             if (_advancedPanel != null) this.Controls.Add(_advancedPanel);
@@ -63,8 +62,64 @@ namespace SharpSFV
             if (_menuStrip != null) this.Controls.Add(_menuStrip);
         }
 
+        private void SetupAdvancedPanel()
+        {
+            if (_advancedPanel != null) return;
+
+            _advancedPanel = new Panel
+            {
+                Height = 35,
+                Dock = DockStyle.Top,
+                BackColor = Color.FromArgb(240, 240, 245),
+                Padding = new Padding(2),
+                Visible = _settings.ShowAdvancedBar
+            };
+
+            ToolTip tt = new ToolTip
+            {
+                AutoPopDelay = 15000,
+                InitialDelay = 500,
+                ReshowDelay = 500,
+                ShowAlways = true,
+                IsBalloon = false
+            };
+
+            Label lblPrefix = new Label { Text = "Path Prefix:", AutoSize = true, Location = new Point(5, 10) };
+            _txtPathPrefix = new TextBox { Width = 150, Location = new Point(75, 7), Text = _settings.PathPrefix };
+            tt.SetToolTip(_txtPathPrefix, "Virtual folder structure to prepend to saved paths.\nExample: incoming\\iso\\");
+            _txtPathPrefix.TextChanged += (s, e) => _settings.PathPrefix = _txtPathPrefix.Text;
+
+            Label lblInc = new Label { Text = "Include:", AutoSize = true, Location = new Point(240, 10) };
+            _txtInclude = new TextBox { Width = 80, Location = new Point(290, 7), Text = _settings.IncludePattern };
+            tt.SetToolTip(_txtInclude, "Only process files matching these patterns.\nSeparate multiple patterns with a semicolon (;).\nExample: *.iso;*.mkv;*.rar");
+            _txtInclude.TextChanged += (s, e) => _settings.IncludePattern = _txtInclude.Text;
+
+            Label lblExc = new Label { Text = "Exclude:", AutoSize = true, Location = new Point(380, 10) };
+            _txtExclude = new TextBox { Width = 80, Location = new Point(430, 7), Text = _settings.ExcludePattern };
+            tt.SetToolTip(_txtExclude, "Skip files matching these patterns.\nSeparate multiple patterns with a semicolon (;).\nExample: *.txt;*.nfo;*.sfv");
+            _txtExclude.TextChanged += (s, e) => _settings.ExcludePattern = _txtExclude.Text;
+
+            _chkRecursive = new CheckBox { Text = "Scan Subfolders", AutoSize = true, Location = new Point(530, 9), Checked = _settings.ScanRecursive };
+            tt.SetToolTip(_chkRecursive, "If checked, all subdirectories will be scanned recursively.");
+            _chkRecursive.CheckedChanged += (s, e) => _settings.ScanRecursive = _chkRecursive.Checked;
+
+            _chkComments = new CheckBox { Text = "Save Comments", AutoSize = true, Location = new Point(650, 9), Checked = _settings.EnableChecksumComments };
+            tt.SetToolTip(_chkComments, "If checked, header comments (Generated By / Algorithm) will be written to the output file.");
+            _chkComments.CheckedChanged += (s, e) => _settings.EnableChecksumComments = _chkComments.Checked;
+
+            _advancedPanel.Controls.AddRange(new Control[] {
+                lblPrefix, _txtPathPrefix,
+                lblInc, _txtInclude,
+                lblExc, _txtExclude,
+                _chkRecursive,
+                _chkComments
+            });
+        }
+
         private void SetupCommentsPanel()
         {
+            if (_commentsPanel != null) return;
+
             _commentsPanel = new Panel
             {
                 Height = 60,
@@ -92,6 +147,8 @@ namespace SharpSFV
 
         private void SetupStatsPanel()
         {
+            if (_statsPanel != null) return;
+
             _statsPanel = new Panel { Height = 50, Dock = DockStyle.Top, BackColor = SystemColors.ControlLight, Padding = new Padding(10, 5, 10, 5) };
 
             _lblProgress = new Label { Text = "Ready", AutoSize = true, Location = new Point(10, 8) };
@@ -168,15 +225,14 @@ namespace SharpSFV
 
         private void SetupFilterPanel()
         {
+            if (_filterPanel != null) return;
+
             _filterPanel = new Panel { Height = 35, Dock = DockStyle.Top, BackColor = SystemColors.Control, Padding = new Padding(5), Visible = false };
 
             Label lblSearch = new Label { Text = "Search:", AutoSize = true, Location = new Point(10, 8) };
             _txtFilter = new TextBox { Width = 200, Location = new Point(60, 5) };
 
-            _txtFilter.TextChanged += (s, e) =>
-            {
-                _filterDebounceTimer?.Change(300, System.Threading.Timeout.Infinite);
-            };
+            _txtFilter.TextChanged += (s, e) => { _filterDebounceTimer?.Change(300, System.Threading.Timeout.Infinite); };
 
             Label lblStatus = new Label { Text = "Status:", AutoSize = true, Location = new Point(280, 8) };
             _cmbStatusFilter = new ComboBox { Width = 100, Location = new Point(330, 5), DropDownStyle = ComboBoxStyle.DropDownList };
@@ -194,8 +250,9 @@ namespace SharpSFV
 
         private void SetupUIForMode(string mode)
         {
-            lvFiles.ColumnWidthChanging -= LvFiles_ColumnWidthChanging;
+            if (lvFiles == null) return;
 
+            lvFiles.ColumnWidthChanging -= LvFiles_ColumnWidthChanging;
             lvFiles.Columns.Clear();
             _originalColWidths.Clear();
             _listSorter.SortColumn = -1;
@@ -226,11 +283,16 @@ namespace SharpSFV
                 AddColLocal("Time", 80, "Time");
 
             if (_lblTotalTime != null)
-            {
                 _lblTotalTime.Visible = _settings.ShowTimeTab;
-            }
 
-            this.Text = (_isVerificationMode) ? "SharpSFV - Verify" : $"SharpSFV - Create [{_currentHashType}]";
+            // TITLE BAR LOGIC:
+            // Standard Mode (Idle) -> "SharpSFV"
+            // Verification Mode -> "SharpSFV - Verify"
+            // Job Mode handled by SetAppMode
+            if (!_isJobMode)
+            {
+                this.Text = (_isVerificationMode) ? "SharpSFV - Verify" : "SharpSFV";
+            }
 
             if (_settings.ColumnOrder.Count > 0)
             {
@@ -238,19 +300,133 @@ namespace SharpSFV
                 {
                     if (ch.Tag is string tag && _settings.ColumnOrder.TryGetValue(tag, out int displayIdx))
                     {
-                        if (displayIdx < lvFiles.Columns.Count)
-                            ch.DisplayIndex = displayIdx;
+                        if (displayIdx < lvFiles.Columns.Count) ch.DisplayIndex = displayIdx;
                     }
                 }
             }
 
-            if (_lvActiveJobs != null)
+            lvFiles.ColumnWidthChanging += LvFiles_ColumnWidthChanging;
+        }
+
+        private void SetAppMode(bool jobMode)
+        {
+            if (_isJobMode == jobMode) return;
+            _isJobMode = jobMode;
+
+            if (_menuJobsEnable != null) _menuJobsEnable.Checked = _isJobMode;
+
+            lvFiles.BeginUpdate();
+            lvFiles.Columns.Clear();
+            _originalColWidths.Clear();
+
+            if (_isJobMode)
             {
-                if (_lvActiveJobs.Columns.Count > 0) _lvActiveJobs.Columns[0].Width = 300;
-                if (_lvActiveJobs.Columns.Count > 1) _lvActiveJobs.Columns[1].Width = 220;
+                AddCol("Job Name", 250, "JobName");
+                AddCol("Root Path", 350, "RootPath");
+                AddCol("Progress", 100, "Progress");
+                AddCol("Status", 100, "Status");
+
+                if (_mainSplitter != null) _mainSplitter.Panel1Collapsed = true;
+                if (_filterPanel != null) _filterPanel.Visible = false;
+                if (_advancedPanel != null) _advancedPanel.Visible = false;
+                if (_commentsPanel != null) _commentsPanel.Visible = false;
+
+                lvFiles.VirtualListSize = _jobStore.Count;
+                this.Text = $"SharpSFV - Job Queue [{_currentHashType}]";
+
+                UpdateJobStats();
+            }
+            else
+            {
+                SetupUIForMode("Creation");
+                if (_settings.ShowFilterPanel && _filterPanel != null) _filterPanel.Visible = true;
+                if (_settings.ShowAdvancedBar && _advancedPanel != null) _advancedPanel.Visible = true;
+
+                if (_commentsPanel != null && _txtComments != null)
+                    _commentsPanel.Visible = !string.IsNullOrWhiteSpace(_txtComments.Text);
+
+                lvFiles.VirtualListSize = _displayIndices.Count;
+                SetAlgorithm(_currentHashType); // Restore standard selection visual
+
+                UpdateStats(0, 0, 0, 0, 0);
             }
 
-            lvFiles.ColumnWidthChanging += LvFiles_ColumnWidthChanging;
+            lvFiles.EndUpdate();
+            lvFiles.Invalidate();
+        }
+
+        private void UpdateStats(int current, int total, int ok, int bad, int missing)
+        {
+            if (_isJobMode) return;
+
+            if (_lblProgress != null)
+            {
+                if (total == 0 && current == 0) _lblProgress.Text = "Ready";
+                else _lblProgress.Text = $"Completed files: {current} / {total}";
+                _lblProgress.Update();
+            }
+
+            if (_lblStatsOK != null)
+            {
+                _lblStatsOK.Text = $"OK: {ok}";
+                _lblStatsOK.ForeColor = ColGreenText;
+            }
+            if (_lblStatsBad != null)
+            {
+                _lblStatsBad.Text = $"BAD: {bad}";
+                _lblStatsBad.ForeColor = ColRedText;
+            }
+            if (_lblStatsMissing != null)
+            {
+                _lblStatsMissing.Text = $"MISSING: {missing}";
+                _lblStatsMissing.ForeColor = ColYellowText;
+            }
+
+            if (_menuGenBadFiles != null)
+                _menuGenBadFiles.Enabled = (bad > 0);
+
+            _statsFlowPanel?.Update();
+        }
+
+        private void UpdateJobStats()
+        {
+            if (!_isJobMode) return;
+
+            int done = 0;
+            int error = 0;
+            int inProgress = 0;
+            int paused = 0;
+
+            for (int i = 0; i < _jobStore.Count; i++)
+            {
+                switch (_jobStore.Statuses[i])
+                {
+                    case JobStatus.Done: done++; break;
+                    case JobStatus.Error: error++; break;
+                    case JobStatus.InProgress: inProgress++; break;
+                    case JobStatus.Paused: paused++; break;
+                }
+            }
+
+            if (_lblProgress != null) _lblProgress.Text = $"Jobs Completed: {done} / {_jobStore.Count}";
+
+            if (_lblStatsOK != null)
+            {
+                _lblStatsOK.Text = $"DONE: {done}";
+                _lblStatsOK.ForeColor = ColGreenText;
+            }
+
+            if (_lblStatsBad != null)
+            {
+                _lblStatsBad.Text = $"ERROR: {error}";
+                _lblStatsBad.ForeColor = ColRedText;
+            }
+
+            if (_lblStatsMissing != null)
+            {
+                _lblStatsMissing.Text = $"ACTIVE: {inProgress + paused}";
+                _lblStatsMissing.ForeColor = Color.Blue;
+            }
         }
 
         private void ApplySettings()
@@ -272,6 +448,13 @@ namespace SharpSFV
 
             if (_menuOptionsAdvanced != null) _menuOptionsAdvanced.Checked = _settings.ShowAdvancedBar;
             if (_advancedPanel != null) _advancedPanel.Visible = _settings.ShowAdvancedBar;
+
+            // Apply Advanced Controls
+            if (_txtPathPrefix != null) _txtPathPrefix.Text = _settings.PathPrefix;
+            if (_txtInclude != null) _txtInclude.Text = _settings.IncludePattern;
+            if (_txtExclude != null) _txtExclude.Text = _settings.ExcludePattern;
+            if (_chkRecursive != null) _chkRecursive.Checked = _settings.ScanRecursive;
+            if (_chkComments != null) _chkComments.Checked = _settings.EnableChecksumComments;
 
             SetProcessingMode(_settings.ProcessingMode);
             SetPathStorageMode(_settings.PathStorageMode);

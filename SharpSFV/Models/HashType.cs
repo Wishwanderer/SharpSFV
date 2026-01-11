@@ -2,7 +2,7 @@
 {
     public enum HashType
     {
-        XxHash3,
+        XXHASH3,
         Crc32,
         MD5,
         SHA1,
