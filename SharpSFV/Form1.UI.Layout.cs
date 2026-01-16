@@ -250,6 +250,9 @@ namespace SharpSFV
 
         private void SetupUIForMode(string mode)
         {
+            // FIX: If we are in Job Mode, do NOT let standard view options reset the columns
+            if (_isJobMode) return;
+
             if (lvFiles == null) return;
 
             lvFiles.ColumnWidthChanging -= LvFiles_ColumnWidthChanging;
@@ -325,11 +328,15 @@ namespace SharpSFV
                 AddCol("Root Path", 350, "RootPath");
                 AddCol("Progress", 100, "Progress");
                 AddCol("Status", 100, "Status");
+                AddCol("Time", 100, "Time"); // NEW: Time column for Job Mode
 
                 if (_mainSplitter != null) _mainSplitter.Panel1Collapsed = true;
                 if (_filterPanel != null) _filterPanel.Visible = false;
                 if (_advancedPanel != null) _advancedPanel.Visible = false;
                 if (_commentsPanel != null) _commentsPanel.Visible = false;
+
+                // Ensure global time label is hidden in Job Mode
+                if (_lblTotalTime != null) _lblTotalTime.Visible = false;
 
                 lvFiles.VirtualListSize = _jobStore.Count;
                 this.Text = $"SharpSFV - Job Queue [{_currentHashType}]";

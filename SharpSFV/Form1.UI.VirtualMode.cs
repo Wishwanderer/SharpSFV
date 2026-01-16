@@ -56,6 +56,9 @@ namespace SharpSFV
                     };
                     item.SubItems.Add(statusStr);
 
+                    // Column 4: Time (NEW)
+                    item.SubItems.Add(_jobStore.TimeStrs[idx]);
+
                     // Colors
                     switch (status)
                     {

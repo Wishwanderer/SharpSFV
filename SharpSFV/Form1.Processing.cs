@@ -108,6 +108,9 @@ namespace SharpSFV
                     int jobId = _jobStore.Ids[currentJobIdx];
                     string jobName = _jobStore.Names[currentJobIdx];
 
+                    // Start Timing the Job
+                    Stopwatch jobSw = Stopwatch.StartNew();
+
                     // Determine Processing Mode for this Job
                     bool isHDD = false;
                     if (_settings.ProcessingMode == ProcessingMode.HDD)
@@ -170,6 +173,11 @@ namespace SharpSFV
 
                     // Save
                     bool hasErrors = SaveChecksumFileForJob(fullSavePath);
+
+                    // Stop Timing
+                    jobSw.Stop();
+                    string jobTimeStr = $"{jobSw.ElapsedMilliseconds} ms";
+                    _jobStore.UpdateTime(currentJobIdx, jobTimeStr);
 
                     // Finalize Job
                     JobStatus finalStatus = hasErrors ? JobStatus.Error : JobStatus.Done;
@@ -409,13 +417,10 @@ namespace SharpSFV
                                 }
                                 catch { status = ItemStatus.Error; }
 
+                                // Always calculate time, regardless of visibility settings
                                 long endTick = Stopwatch.GetTimestamp();
-                                string timeStr = "";
-                                if (_settings.ShowTimeTab)
-                                {
-                                    double elapsedMs = (double)(endTick - startTick) * 1000 / Stopwatch.Frequency;
-                                    timeStr = $"{(long)elapsedMs} ms";
-                                }
+                                double elapsedMs = (double)(endTick - startTick) * 1000 / Stopwatch.Frequency;
+                                string timeStr = $"{(long)elapsedMs} ms";
 
                                 if (hashBytes == null || status == ItemStatus.Error)
                                 {
@@ -692,13 +697,10 @@ namespace SharpSFV
                                 catch (OperationCanceledException) { return; }
                                 catch { }
 
+                                // Always calculate time, regardless of visibility settings
                                 long endTick = Stopwatch.GetTimestamp();
-                                string timeStr = "";
-                                if (_settings.ShowTimeTab)
-                                {
-                                    double elapsedMs = (double)(endTick - startTick) * 1000 / Stopwatch.Frequency;
-                                    timeStr = $"{(long)elapsedMs} ms";
-                                }
+                                double elapsedMs = (double)(endTick - startTick) * 1000 / Stopwatch.Frequency;
+                                string timeStr = $"{(long)elapsedMs} ms";
 
                                 bool isMatch = false;
                                 if (calculatedHash != null && job.ExpectedHash != null)

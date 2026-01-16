@@ -6,7 +6,7 @@ namespace SharpSFV.Models
     {
         Queued,
         InProgress,
-        Paused, // NEW: Added for Pause functionality
+        Paused, // Added for Pause functionality
         Done,
         Error
     }
@@ -27,6 +27,7 @@ namespace SharpSFV.Models
         public double[] Progress;
         public JobStatus[] Statuses;
         public string[] OutputPaths; // Where the hash file was saved
+        public string[] TimeStrs;    // NEW: Track elapsed time per job
 
         public JobStore()
         {
@@ -37,6 +38,7 @@ namespace SharpSFV.Models
             Progress = new double[InitialCapacity];
             Statuses = new JobStatus[InitialCapacity];
             OutputPaths = new string[InitialCapacity];
+            TimeStrs = new string[InitialCapacity];
         }
 
         public int Add(string name, string rootPath, string[] inputs)
@@ -53,6 +55,7 @@ namespace SharpSFV.Models
                 Progress[index] = 0;
                 Statuses[index] = JobStatus.Queued;
                 OutputPaths[index] = "";
+                TimeStrs[index] = "";
 
                 Count++;
                 return index;
@@ -69,6 +72,11 @@ namespace SharpSFV.Models
         {
             Statuses[index] = status;
             if (!string.IsNullOrEmpty(output)) OutputPaths[index] = output;
+        }
+
+        public void UpdateTime(int index, string timeStr)
+        {
+            TimeStrs[index] = timeStr;
         }
 
         public void RemoveCompleted()
@@ -90,6 +98,7 @@ namespace SharpSFV.Models
                             Progress[writeIndex] = Progress[readIndex];
                             Statuses[writeIndex] = Statuses[readIndex];
                             OutputPaths[writeIndex] = OutputPaths[readIndex];
+                            TimeStrs[writeIndex] = TimeStrs[readIndex];
                         }
                         writeIndex++;
                     }
@@ -102,6 +111,7 @@ namespace SharpSFV.Models
                     RootPaths[i] = null!;
                     InputPaths[i] = null!;
                     OutputPaths[i] = null!;
+                    TimeStrs[i] = null!;
                     // Note: Status/Ids/Progress are value types, no need to clear
                 }
 
@@ -119,6 +129,7 @@ namespace SharpSFV.Models
             Array.Resize(ref Progress, newCap);
             Array.Resize(ref Statuses, newCap);
             Array.Resize(ref OutputPaths, newCap);
+            Array.Resize(ref TimeStrs, newCap);
             _capacity = newCap;
         }
 

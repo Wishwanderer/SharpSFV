@@ -43,9 +43,28 @@ namespace SharpSFV
 
             // --- VIEW MENU ---
             var menuView = new ToolStripMenuItem("View");
-            _menuViewHash = new ToolStripMenuItem("Show Hash", null, (s, e) => { _settings.ShowHashCol = !_settings.ShowHashCol; SetupUIForMode(_isVerificationMode ? "Verification" : "Creation"); }) { CheckOnClick = true, Checked = true };
-            _menuViewExpected = new ToolStripMenuItem("Show Expected Hash", null, (s, e) => { _settings.ShowExpectedHashCol = !_settings.ShowExpectedHashCol; SetupUIForMode(_isVerificationMode ? "Verification" : "Creation"); }) { CheckOnClick = true, Checked = true };
-            _menuViewLockCols = new ToolStripMenuItem("Lock Column Order", null, (s, e) => { _settings.LockColumns = !_settings.LockColumns; lvFiles.AllowColumnReorder = !_settings.LockColumns; }) { CheckOnClick = true, Checked = true };
+
+            // FIX: Check for Job Mode to prevent column reset
+            _menuViewHash = new ToolStripMenuItem("Show Hash", null, (s, e) => {
+                _settings.ShowHashCol = !_settings.ShowHashCol;
+                if (_isJobMode) lvFiles.Invalidate();
+                else SetupUIForMode(_isVerificationMode ? "Verification" : "Creation");
+            })
+            { CheckOnClick = true, Checked = true };
+
+            // FIX: Check for Job Mode to prevent column reset
+            _menuViewExpected = new ToolStripMenuItem("Show Expected Hash", null, (s, e) => {
+                _settings.ShowExpectedHashCol = !_settings.ShowExpectedHashCol;
+                if (_isJobMode) lvFiles.Invalidate();
+                else SetupUIForMode(_isVerificationMode ? "Verification" : "Creation");
+            })
+            { CheckOnClick = true, Checked = true };
+
+            _menuViewLockCols = new ToolStripMenuItem("Lock Column Order", null, (s, e) => {
+                _settings.LockColumns = !_settings.LockColumns;
+                lvFiles.AllowColumnReorder = !_settings.LockColumns;
+            })
+            { CheckOnClick = true, Checked = true };
 
             _menuViewTime = new ToolStripMenuItem("Show Time Elapsed Tab", null, (s, e) => ToggleTimeColumn()) { CheckOnClick = true };
             _menuViewShowFullPaths = new ToolStripMenuItem("Show Full File Paths", null, (s, e) => ToggleShowFullPaths(true)) { CheckOnClick = true };
@@ -195,6 +214,7 @@ namespace SharpSFV
         private void ToggleTimeColumn()
         {
             _settings.ShowTimeTab = _menuViewTime?.Checked ?? false;
+            // FIX: Prevent UI Setup in Job Mode
             if (!_isJobMode) SetupUIForMode(_isVerificationMode ? "Verification" : "Creation");
         }
 
