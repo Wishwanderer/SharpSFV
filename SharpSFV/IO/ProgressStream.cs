@@ -12,7 +12,7 @@ namespace SharpSFV
         private readonly long _totalLength;
         private long _bytesRead;
 
-        // Optimization: Throttling
+        // Optimization: Resolve Throttling
         private readonly long _bytesPerStep; // 0.1% resolution
         private long _bytesSinceLastReport;
         private long _lastReportTick;

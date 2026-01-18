@@ -6,7 +6,7 @@ using System.Windows.Forms;
 namespace SharpSFV
 {
     /// <summary>
-    /// OPTIMIZATION #2: Index-Based Sorter.
+    /// Index-Based Sorter:
     /// Implements IComparer<int> to sort indices based on data in the FileStore arrays.
     /// Eliminates object pointer chasing during sort operations.
     /// </summary>

@@ -12,7 +12,14 @@ namespace SharpSFV
 {
     public partial class Form1
     {
-        private ToolStripMenuItem? _menuJobsEnable;
+        // Menu References
+        private ToolStripMenuItem? _menuModeStandard;
+        private ToolStripMenuItem? _menuModeJob;
+        private ToolStripMenuItem? _menuViewThroughput;
+
+        // Bad File Tool References
+        private ToolStripMenuItem? _menuMoveBad;
+        private ToolStripMenuItem? _menuRenameBad;
 
         private void SetupCustomMenu()
         {
@@ -27,24 +34,22 @@ namespace SharpSFV
 
             // --- EDIT MENU ---
             var menuEdit = new ToolStripMenuItem("Edit");
-            menuEdit.DropDownItems.Add(new ToolStripMenuItem("Copy Details", null, (s, e) => PerformCopyAction()) { ShortcutKeys = Keys.Control | Keys.C });
+            menuEdit.DropDownItems.Add(new ToolStripMenuItem("Copy Entry", null, (s, e) => PerformCopyAction()) { ShortcutKeys = Keys.Control | Keys.C });
             menuEdit.DropDownItems.Add(new ToolStripMenuItem("Paste Paths", null, (s, e) => PerformPasteAction()) { ShortcutKeys = Keys.Control | Keys.V });
+            menuEdit.DropDownItems.Add(new ToolStripMenuItem("Compare with Clipboard", null, (s, e) => PerformCompareClipboard()));
             menuEdit.DropDownItems.Add(new ToolStripSeparator());
             menuEdit.DropDownItems.Add(new ToolStripMenuItem("Select All", null, (s, e) => PerformSelectAllAction()) { ShortcutKeys = Keys.Control | Keys.A });
 
-            // --- JOBS MENU ---
-            var menuJobs = new ToolStripMenuItem("Jobs");
-            _menuJobsEnable = new ToolStripMenuItem("Enable Job Queue", null, (s, e) => SetAppMode(!_isJobMode)) { CheckOnClick = true };
-            var menuJobsClear = new ToolStripMenuItem("Clear Completed Jobs", null, (s, e) => PerformClearCompletedJobs());
-
-            menuJobs.DropDownItems.Add(_menuJobsEnable);
-            menuJobs.DropDownItems.Add(new ToolStripSeparator());
-            menuJobs.DropDownItems.Add(menuJobsClear);
+            // --- MODE MENU ---
+            var menuMode = new ToolStripMenuItem("Mode");
+            _menuModeStandard = new ToolStripMenuItem("Standard Mode", null, (s, e) => SetAppMode(false));
+            _menuModeJob = new ToolStripMenuItem("Job Queue Mode", null, (s, e) => SetAppMode(true));
+            _menuModeStandard.Checked = !_isJobMode;
+            _menuModeJob.Checked = _isJobMode;
+            menuMode.DropDownItems.AddRange(new ToolStripItem[] { _menuModeStandard, _menuModeJob });
 
             // --- VIEW MENU ---
             var menuView = new ToolStripMenuItem("View");
-
-            // FIX: Check for Job Mode to prevent column reset
             _menuViewHash = new ToolStripMenuItem("Show Hash", null, (s, e) => {
                 _settings.ShowHashCol = !_settings.ShowHashCol;
                 if (_isJobMode) lvFiles.Invalidate();
@@ -52,7 +57,6 @@ namespace SharpSFV
             })
             { CheckOnClick = true, Checked = true };
 
-            // FIX: Check for Job Mode to prevent column reset
             _menuViewExpected = new ToolStripMenuItem("Show Expected Hash", null, (s, e) => {
                 _settings.ShowExpectedHashCol = !_settings.ShowExpectedHashCol;
                 if (_isJobMode) lvFiles.Invalidate();
@@ -67,11 +71,19 @@ namespace SharpSFV
             { CheckOnClick = true, Checked = true };
 
             _menuViewTime = new ToolStripMenuItem("Show Time Elapsed Tab", null, (s, e) => ToggleTimeColumn()) { CheckOnClick = true };
+
+            _menuViewThroughput = new ToolStripMenuItem("Show Throughput & ETA", null, (s, e) => {
+                _settings.ShowThroughputStats = !_settings.ShowThroughputStats;
+                if (_isJobMode) UpdateJobStats(); else UpdateStats(0, 0, 0, 0, 0);
+            })
+            { CheckOnClick = true, Checked = _settings.ShowThroughputStats };
+
             _menuViewShowFullPaths = new ToolStripMenuItem("Show Full File Paths", null, (s, e) => ToggleShowFullPaths(true)) { CheckOnClick = true };
 
             menuView.DropDownItems.Add(_menuViewHash);
             menuView.DropDownItems.Add(_menuViewExpected);
             menuView.DropDownItems.Add(_menuViewTime);
+            menuView.DropDownItems.Add(_menuViewThroughput);
             menuView.DropDownItems.Add(_menuViewShowFullPaths);
             menuView.DropDownItems.Add(new ToolStripSeparator());
             menuView.DropDownItems.Add(_menuViewLockCols);
@@ -79,27 +91,19 @@ namespace SharpSFV
             // --- OPTIONS MENU ---
             var menuOptions = new ToolStripMenuItem("Options");
 
-            // Path Storage Submenu
             var menuPathStorage = new ToolStripMenuItem("Path Storage");
             _menuPathRelative = new ToolStripMenuItem("Relative Paths (Default)", null, (s, e) => SetPathStorageMode(PathStorageMode.Relative));
             _menuPathAbsolute = new ToolStripMenuItem("Absolute Paths", null, (s, e) => SetPathStorageMode(PathStorageMode.Absolute));
             menuPathStorage.DropDownItems.AddRange(new ToolStripItem[] { _menuPathRelative, _menuPathAbsolute });
 
-            // Advanced Bar Toggle
             _menuOptionsAdvanced = new ToolStripMenuItem("Show Advanced Options Bar", null, (s, e) => ToggleAdvancedBar()) { CheckOnClick = true };
-
             _menuOptionsFilter = new ToolStripMenuItem("Show Search/Filter Bar", null, (s, e) => ToggleFilterPanel()) { CheckOnClick = true };
 
-            // Processing Mode Submenu
             var menuProcMode = new ToolStripMenuItem("Processing Mode");
             _menuProcAuto = new ToolStripMenuItem("Automatic Detection (Default)", null, (s, e) => SetProcessingMode(ProcessingMode.Auto));
             _menuProcHDD = new ToolStripMenuItem("HDD Mode (Sequential)", null, (s, e) => SetProcessingMode(ProcessingMode.HDD));
             _menuProcSSD = new ToolStripMenuItem("SSD Mode (Parallel)", null, (s, e) => SetProcessingMode(ProcessingMode.SSD));
             menuProcMode.DropDownItems.AddRange(new ToolStripItem[] { _menuProcAuto, _menuProcHDD, _menuProcSSD });
-
-            _menuGenCopyDups = new ToolStripMenuItem("Generate Copy Duplicates Script", null, (s, e) => PerformGenerateDupCopyScript()) { Enabled = false };
-            _menuGenDelDups = new ToolStripMenuItem("Generate Delete Duplicates Script", null, (s, e) => PerformGenerateDupDeleteScript()) { Enabled = false };
-            _menuGenBadFiles = new ToolStripMenuItem("Generate 'Delete BAD Files' Script", null, (s, e) => PerformBatchExport()) { Enabled = false };
 
             var menuAlgo = new ToolStripMenuItem("Default Hashing Algorithm");
             AddAlgoMenuItem(menuAlgo, "xxHash-3 (128-bit)", HashType.XXHASH3);
@@ -108,6 +112,24 @@ namespace SharpSFV
             AddAlgoMenuItem(menuAlgo, "SHA-1", HashType.SHA1);
             AddAlgoMenuItem(menuAlgo, "SHA-256", HashType.SHA256);
 
+            var menuSystem = new ToolStripMenuItem("System Integration");
+            menuSystem.DropDownItems.Add(new ToolStripMenuItem("Register Explorer Context Menu", null, (s, e) => PerformRegisterShell()));
+            menuSystem.DropDownItems.Add(new ToolStripMenuItem("Unregister Explorer Context Menu", null, (s, e) => PerformUnregisterShell()));
+
+            var menuBadTools = new ToolStripMenuItem("Bad File Tools");
+            _menuMoveBad = new ToolStripMenuItem("Move Bad Files to '_BAD_FILES'...", null, (s, e) => PerformMoveBadFiles()) { Enabled = false };
+            _menuRenameBad = new ToolStripMenuItem("Rename Bad Files (*.CORRUPT)...", null, (s, e) => PerformRenameBadFiles()) { Enabled = false };
+            menuBadTools.DropDownItems.Add(_menuMoveBad);
+            menuBadTools.DropDownItems.Add(_menuRenameBad);
+            menuBadTools.DropDownItems.Add(new ToolStripSeparator());
+            _menuGenBadFiles = new ToolStripMenuItem("Generate 'Delete BAD Files' Script", null, (s, e) => PerformBatchExport()) { Enabled = false };
+            menuBadTools.DropDownItems.Add(_menuGenBadFiles);
+
+            var menuDupTools = new ToolStripMenuItem("Duplicate Tools");
+            _menuGenCopyDups = new ToolStripMenuItem("Generate Copy Duplicates Script", null, (s, e) => PerformGenerateDupCopyScript()) { Enabled = false };
+            _menuGenDelDups = new ToolStripMenuItem("Generate Delete Duplicates Script", null, (s, e) => PerformGenerateDupDeleteScript()) { Enabled = false };
+            menuDupTools.DropDownItems.AddRange(new ToolStripItem[] { _menuGenCopyDups, _menuGenDelDups });
+
             menuOptions.DropDownItems.AddRange(new ToolStripItem[] {
                 menuPathStorage,
                 _menuOptionsAdvanced,
@@ -115,9 +137,9 @@ namespace SharpSFV
                 menuProcMode,
                 menuAlgo,
                 new ToolStripSeparator(),
-                _menuGenBadFiles,
-                _menuGenCopyDups,
-                _menuGenDelDups
+                menuSystem,
+                menuBadTools,
+                menuDupTools
             });
 
             // --- HELP MENU ---
@@ -128,59 +150,7 @@ namespace SharpSFV
             menuHelp.DropDownItems.Add(new ToolStripSeparator());
             menuHelp.DropDownItems.Add(new ToolStripMenuItem("Credits", null, (s, e) => ShowCredits()));
 
-            _menuStrip.Items.AddRange(new ToolStripItem[] { menuFile, menuEdit, menuJobs, menuView, menuOptions, menuHelp });
-        }
-
-        private void SetPathStorageMode(PathStorageMode mode)
-        {
-            _settings.PathStorageMode = mode;
-            if (_menuPathRelative != null) _menuPathRelative.Checked = (mode == PathStorageMode.Relative);
-            if (_menuPathAbsolute != null) _menuPathAbsolute.Checked = (mode == PathStorageMode.Absolute);
-        }
-
-        private void SetProcessingMode(ProcessingMode mode)
-        {
-            _settings.ProcessingMode = mode;
-            if (_menuProcAuto != null) _menuProcAuto.Checked = (mode == ProcessingMode.Auto);
-            if (_menuProcHDD != null) _menuProcHDD.Checked = (mode == ProcessingMode.HDD);
-            if (_menuProcSSD != null) _menuProcSSD.Checked = (mode == ProcessingMode.SSD);
-        }
-
-        private void SetupContextMenu()
-        {
-            _ctxMenu = new ContextMenuStrip();
-            var itemOpen = new ToolStripMenuItem("Open Containing Folder", null, CtxOpenFolder_Click);
-            var itemCopyPath = new ToolStripMenuItem("Copy Full Path", null, CtxCopyPath_Click);
-            var itemCopyHash = new ToolStripMenuItem("Copy Hash", null, CtxCopyHash_Click);
-            var itemRename = new ToolStripMenuItem("Rename File...", null, CtxRename_Click);
-            var itemDelete = new ToolStripMenuItem("Delete File", null, CtxDelete_Click);
-            var itemRemove = new ToolStripMenuItem("Remove from List", null, CtxRemoveList_Click);
-
-            _ctxMenu.Items.AddRange(new ToolStripItem[] { itemOpen, new ToolStripSeparator(), itemCopyPath, itemCopyHash, new ToolStripSeparator(), itemRename, itemDelete, itemRemove });
-
-            _ctxMenu.Opening += (s, e) =>
-            {
-                if (_isJobMode) { e.Cancel = true; return; }
-
-                if (lvFiles.SelectedIndices.Count == 0) { e.Cancel = true; return; }
-                bool singleSel = lvFiles.SelectedIndices.Count == 1;
-                bool fileExists = false;
-
-                if (singleSel)
-                {
-                    int storeIdx = _displayIndices[lvFiles.SelectedIndices[0]];
-                    string fullPath = _fileStore.GetFullPath(storeIdx);
-                    if (!string.IsNullOrEmpty(fullPath))
-                        fileExists = File.Exists(fullPath);
-                }
-
-                itemOpen.Enabled = singleSel;
-                itemRename.Enabled = singleSel && fileExists;
-                itemDelete.Enabled = singleSel && fileExists;
-                itemCopyPath.Enabled = singleSel;
-                itemCopyHash.Enabled = singleSel;
-            };
-            lvFiles.ContextMenuStrip = _ctxMenu;
+            _menuStrip.Items.AddRange(new ToolStripItem[] { menuFile, menuEdit, menuMode, menuView, menuOptions, menuHelp });
         }
 
         private void AddAlgoMenuItem(ToolStripMenuItem parent, string text, HashType type)
@@ -190,38 +160,55 @@ namespace SharpSFV
             _algoMenuItems[type] = item;
         }
 
-        private void SetAlgorithm(HashType type)
+        private void SetupContextMenu()
         {
-            _currentHashType = type;
-            foreach (var kvp in _algoMenuItems) kvp.Value.Checked = (kvp.Key == type);
-            if (!_isProcessing)
+            _ctxMenu = new ContextMenuStrip();
+            var itemOpen = new ToolStripMenuItem("Open Containing Folder", null, CtxOpenFolder_Click);
+            var itemCopyEntry = new ToolStripMenuItem("Copy Entry", null, (s, e) => PerformCopyAction());
+            var itemRename = new ToolStripMenuItem("Rename File...", null, CtxRename_Click);
+            var itemDelete = new ToolStripMenuItem("Delete File", null, CtxDelete_Click);
+            var itemRemove = new ToolStripMenuItem("Remove from List", null, CtxRemoveList_Click);
+
+            _ctxMenu.Items.AddRange(new ToolStripItem[] {
+                itemOpen,
+                new ToolStripSeparator(),
+                itemCopyEntry,
+                new ToolStripSeparator(),
+                itemRename,
+                itemDelete,
+                itemRemove
+            });
+
+            _ctxMenu.Opening += (s, e) =>
             {
-                if (_isJobMode)
-                {
-                    this.Text = $"SharpSFV - Job Queue [{_currentHashType}]";
-                }
-                else if (_isVerificationMode)
-                {
-                    this.Text = $"SharpSFV - Verify [{_currentHashType}]";
-                }
-                else
-                {
-                    this.Text = $"SharpSFV [{_currentHashType}]";
-                }
-            }
-        }
+                if (_isJobMode) { e.Cancel = true; return; }
+                if (lvFiles.SelectedIndices.Count == 0) { e.Cancel = true; return; }
 
-        private void ToggleTimeColumn()
-        {
-            _settings.ShowTimeTab = _menuViewTime?.Checked ?? false;
-            // FIX: Prevent UI Setup in Job Mode
-            if (!_isJobMode) SetupUIForMode(_isVerificationMode ? "Verification" : "Creation");
-        }
+                int selCount = lvFiles.SelectedIndices.Count;
+                bool singleSel = selCount == 1;
+                bool fileExists = false;
 
-        private void ToggleFilterPanel()
-        {
-            _settings.ShowFilterPanel = _menuOptionsFilter?.Checked ?? false;
-            if (_filterPanel != null && !_isJobMode) _filterPanel.Visible = _settings.ShowFilterPanel;
+                if (singleSel)
+                {
+                    int storeIdx = _displayIndices[lvFiles.SelectedIndices[0]];
+                    string fullPath = _fileStore.GetFullPath(storeIdx);
+                    if (!string.IsNullOrEmpty(fullPath)) fileExists = File.Exists(fullPath);
+                }
+
+                // Dynamic Text for Multi-Select
+                itemCopyEntry.Text = singleSel ? "Copy Entry" : "Copy Entries";
+                itemDelete.Text = singleSel ? "Delete File" : "Delete Files";
+
+                // Single Select Actions
+                itemOpen.Enabled = singleSel;
+                itemRename.Enabled = singleSel && fileExists;
+
+                // Multi Select Actions
+                itemCopyEntry.Enabled = selCount > 0;
+                itemDelete.Enabled = selCount > 0;
+                itemRemove.Enabled = selCount > 0;
+            };
+            lvFiles.ContextMenuStrip = _ctxMenu;
         }
     }
 }

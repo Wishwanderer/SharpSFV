@@ -28,7 +28,7 @@ namespace SharpSFV
                         return xx3.GetCurrentHash();
 
                     case HashType.Crc32:
-                        // FIX: Explicitly specify System.IO.Hashing to avoid ambiguity with ARM Intrinsics
+                        // Explicitly specify System.IO.Hashing to avoid ambiguity with ARM Intrinsics
                         var crc = new System.IO.Hashing.Crc32();
                         while ((bytesRead = inputStream.Read(buffer, 0, buffer.Length)) > 0)
                         {
@@ -55,7 +55,7 @@ namespace SharpSFV
             catch { return null; }
         }
 
-        // NEW: Zero-Allocation version for RandomAccess (SafeFileHandle)
+        // Zero-Allocation version for RandomAccess (SafeFileHandle)
         public static byte[]? ComputeHashHandle(Microsoft.Win32.SafeHandles.SafeFileHandle handle, HashType type, byte[] buffer, HashAlgorithm? reusedAlgo)
         {
             try
@@ -78,7 +78,7 @@ namespace SharpSFV
                         return xx3.GetCurrentHash();
 
                     case HashType.Crc32:
-                        // FIX: Explicitly specify System.IO.Hashing to avoid ambiguity with ARM Intrinsics
+                        // Explicitly specify System.IO.Hashing to avoid ambiguity with ARM Intrinsics
                         var crc = new System.IO.Hashing.Crc32();
                         while (position < fileLength)
                         {

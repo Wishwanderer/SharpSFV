@@ -14,6 +14,9 @@ namespace SharpSFV
 
         private void SetupLayout()
         {
+            // If running in CLI mode OR Create Mode (Mini UI), skip standard layout
+            if (_isHeadless || _isCreateMode) return;
+
             // 1. Ensure all components are initialized
             if (_mainSplitter == null || lvFiles == null) SetupActiveJobsPanel();
             if (_menuStrip == null) SetupCustomMenu();
@@ -26,7 +29,7 @@ namespace SharpSFV
             this.MinimumSize = new Size(600, 400);
 
             // 2. Configure Components
-            Panel progressPanel = new Panel { Height = 25, Dock = DockStyle.Bottom, Padding = new Padding(2) };
+            Panel progressPanel = new Panel { Height = 15, Dock = DockStyle.Bottom, Padding = new Padding(2) };
 
             if (progressBarTotal != null)
             {
@@ -60,6 +63,77 @@ namespace SharpSFV
             if (_commentsPanel != null) this.Controls.Add(_commentsPanel);
             if (_statsPanel != null) this.Controls.Add(_statsPanel);
             if (_menuStrip != null) this.Controls.Add(_menuStrip);
+        }
+
+        // --- MINI MODE LAYOUT (Streamlined) ---
+        public void SetupMiniLayout()
+        {
+            // Ensure necessary controls exist
+            if (_statsPanel == null) SetupStatsPanel();
+            if (progressBarTotal == null) progressBarTotal = new ProgressBar();
+
+            this.Controls.Clear();
+            this.FormBorderStyle = FormBorderStyle.FixedDialog;
+            this.MaximizeBox = false;
+            this.MinimizeBox = true;
+
+            // Geometry Configuration
+            int marginX = 12;
+            int marginY = 5; // 5px top + 5px bottom = 10px total margin
+            int btnWidth = 75;
+            int btnHeight = 26;
+            int spacing = 10;
+
+            // Calculate Form Dimensions
+            int clientW = 450;
+            int clientH = btnHeight + (marginY * 2);
+            this.ClientSize = new Size(clientW, clientH);
+
+            this.Text = "SharpSFV - Creating...";
+
+            // Y Position for single row (vertically centered)
+            int yPos = marginY;
+
+            // 1. Stop Button (Far Right)
+            int stopX = clientW - marginX - btnWidth;
+            if (_btnStop != null)
+            {
+                _btnStop.Parent = this;
+                _btnStop.Size = new Size(btnWidth, btnHeight);
+                _btnStop.Location = new Point(stopX, yPos);
+                _btnStop.Enabled = true;
+                _btnStop.Visible = true;
+                _btnStop.BringToFront();
+                this.Controls.Add(_btnStop);
+            }
+
+            // 2. Pause Button (Left of Stop)
+            int pauseX = stopX - spacing - btnWidth;
+            if (_btnPause != null)
+            {
+                _btnPause.Parent = this;
+                _btnPause.Size = new Size(btnWidth, btnHeight);
+                _btnPause.Location = new Point(pauseX, yPos);
+                _btnPause.Enabled = true;
+                _btnPause.Visible = true;
+                _btnPause.BringToFront();
+                this.Controls.Add(_btnPause);
+            }
+
+            // 3. Progress Bar (Fills remaining space to the left)
+            if (progressBarTotal != null)
+            {
+                progressBarTotal.Parent = this;
+                progressBarTotal.Dock = DockStyle.None;
+
+                int pBarWidth = pauseX - spacing - marginX;
+
+                progressBarTotal.Location = new Point(marginX, yPos);
+                progressBarTotal.Size = new Size(pBarWidth, btnHeight); // Same height as buttons
+                progressBarTotal.Visible = true;
+                progressBarTotal.BringToFront();
+                this.Controls.Add(progressBarTotal);
+            }
         }
 
         private void SetupAdvancedPanel()
@@ -250,7 +324,7 @@ namespace SharpSFV
 
         private void SetupUIForMode(string mode)
         {
-            // FIX: If we are in Job Mode, do NOT let standard view options reset the columns
+            // If we are in Job Mode, do NOT let standard view options reset the columns
             if (_isJobMode) return;
 
             if (lvFiles == null) return;
@@ -289,9 +363,6 @@ namespace SharpSFV
                 _lblTotalTime.Visible = _settings.ShowTimeTab;
 
             // TITLE BAR LOGIC:
-            // Standard Mode (Idle) -> "SharpSFV"
-            // Verification Mode -> "SharpSFV - Verify"
-            // Job Mode handled by SetAppMode
             if (!_isJobMode)
             {
                 this.Text = (_isVerificationMode) ? "SharpSFV - Verify" : "SharpSFV";
@@ -316,7 +387,11 @@ namespace SharpSFV
             if (_isJobMode == jobMode) return;
             _isJobMode = jobMode;
 
-            if (_menuJobsEnable != null) _menuJobsEnable.Checked = _isJobMode;
+            // Update Radio Button Menu State
+            if (_menuModeStandard != null) _menuModeStandard.Checked = !_isJobMode;
+            if (_menuModeJob != null) _menuModeJob.Checked = _isJobMode;
+
+            UpdateMenuAvailability();
 
             lvFiles.BeginUpdate();
             lvFiles.Columns.Clear();
@@ -328,7 +403,7 @@ namespace SharpSFV
                 AddCol("Root Path", 350, "RootPath");
                 AddCol("Progress", 100, "Progress");
                 AddCol("Status", 100, "Status");
-                AddCol("Time", 100, "Time"); // NEW: Time column for Job Mode
+                AddCol("Time", 100, "Time");
 
                 if (_mainSplitter != null) _mainSplitter.Panel1Collapsed = true;
                 if (_filterPanel != null) _filterPanel.Visible = false;
@@ -362,16 +437,45 @@ namespace SharpSFV
             lvFiles.Invalidate();
         }
 
-        private void UpdateStats(int current, int total, int ok, int bad, int missing)
+        private void UpdateMenuAvailability()
+        {
+            // In Job Mode, certain visual/advanced options are irrelevant and confusing.
+            bool enableStandardFeatures = !_isJobMode;
+
+            // View Menu
+            if (_menuViewHash != null) _menuViewHash.Enabled = enableStandardFeatures;
+            if (_menuViewExpected != null) _menuViewExpected.Enabled = enableStandardFeatures;
+            if (_menuViewTime != null) _menuViewTime.Enabled = enableStandardFeatures;
+
+            // Options Menu (Toolbars)
+            if (_menuOptionsFilter != null) _menuOptionsFilter.Enabled = enableStandardFeatures;
+            if (_menuOptionsAdvanced != null) _menuOptionsAdvanced.Enabled = enableStandardFeatures;
+        }
+
+        private void UpdateStats(int current, int total, int ok, int bad, int missing, string speedInfo = "")
         {
             if (_isJobMode) return;
 
             if (_lblProgress != null)
             {
                 if (total == 0 && current == 0) _lblProgress.Text = "Ready";
-                else _lblProgress.Text = $"Completed files: {current} / {total}";
+                else
+                {
+                    string text = $"Completed files: {current} / {total}";
+                    if (_settings.ShowThroughputStats && !string.IsNullOrEmpty(speedInfo))
+                    {
+                        text += $" | {speedInfo}";
+                    }
+                    _lblProgress.Text = text;
+                }
                 _lblProgress.Update();
             }
+
+            // Conditional Bad File Tools
+            bool hasBadFiles = (bad > 0);
+            if (_menuGenBadFiles != null) _menuGenBadFiles.Enabled = hasBadFiles;
+            if (_menuMoveBad != null) _menuMoveBad.Enabled = hasBadFiles;
+            if (_menuRenameBad != null) _menuRenameBad.Enabled = hasBadFiles;
 
             if (_lblStatsOK != null)
             {
@@ -389,13 +493,10 @@ namespace SharpSFV
                 _lblStatsMissing.ForeColor = ColYellowText;
             }
 
-            if (_menuGenBadFiles != null)
-                _menuGenBadFiles.Enabled = (bad > 0);
-
             _statsFlowPanel?.Update();
         }
 
-        private void UpdateJobStats()
+        private void UpdateJobStats(string speedInfo = "")
         {
             if (!_isJobMode) return;
 
@@ -415,7 +516,15 @@ namespace SharpSFV
                 }
             }
 
-            if (_lblProgress != null) _lblProgress.Text = $"Jobs Completed: {done} / {_jobStore.Count}";
+            if (_lblProgress != null)
+            {
+                string text = $"Jobs Completed: {done} / {_jobStore.Count}";
+                if (_settings.ShowThroughputStats && !string.IsNullOrEmpty(speedInfo))
+                {
+                    text += $" | {speedInfo}";
+                }
+                _lblProgress.Text = text;
+            }
 
             if (_lblStatsOK != null)
             {
@@ -475,6 +584,147 @@ namespace SharpSFV
             ToggleTimeColumn();
             SetAlgorithm(_settings.DefaultAlgo);
             ToggleShowFullPaths(false);
+        }
+
+        // --- CONSOLIDATED UI HELPERS ---
+
+        private void ToggleAdvancedBar()
+        {
+            if (_isJobMode) return;
+
+            _settings.ShowAdvancedBar = _menuOptionsAdvanced?.Checked ?? false;
+            if (_advancedPanel != null) _advancedPanel.Visible = _settings.ShowAdvancedBar;
+        }
+
+        private void ToggleFilterPanel()
+        {
+            // Safety guard: If in Job Mode, do not toggle
+            if (_isJobMode) return;
+
+            _settings.ShowFilterPanel = _menuOptionsFilter?.Checked ?? false;
+            if (_filterPanel != null) _filterPanel.Visible = _settings.ShowFilterPanel;
+        }
+
+        private void ToggleShowFullPaths(bool toggle = true)
+        {
+            if (toggle) _settings.ShowFullPaths = !_settings.ShowFullPaths;
+
+            if (_menuViewShowFullPaths != null) _menuViewShowFullPaths.Checked = _settings.ShowFullPaths;
+
+            RecalculateColumnWidths();
+
+            int nameColIdx = -1;
+            foreach (ColumnHeader ch in lvFiles.Columns)
+            {
+                if (ch.Tag as string == "Name") { nameColIdx = ch.Index; break; }
+            }
+
+            if (nameColIdx != -1)
+            {
+                if (_settings.ShowFullPaths) lvFiles.Columns[nameColIdx].Width = _cachedFullPathWidth;
+                else
+                {
+                    _originalColWidths[nameColIdx] = _cachedFileNameWidth;
+                    lvFiles.Columns[nameColIdx].Width = _cachedFileNameWidth;
+                }
+            }
+            lvFiles.Invalidate();
+        }
+
+        private void RecalculateColumnWidths()
+        {
+            if (_fileStore.Count == 0)
+            {
+                _cachedFullPathWidth = 400;
+                _cachedFileNameWidth = 300;
+                return;
+            }
+
+            string longestPath = "";
+            string longestName = "";
+            int maxPathLen = -1;
+            int maxNameLen = -1;
+
+            for (int i = 0; i < _fileStore.Count; i++)
+            {
+                string? baseDir = _fileStore.BaseDirectories[i];
+                string? relPath = _fileStore.RelativePaths[i];
+                string? name = _fileStore.FileNames[i];
+
+                if (baseDir != null && relPath != null)
+                {
+                    int estimatedLen = baseDir.Length + relPath.Length + 1;
+                    if (estimatedLen > maxPathLen)
+                    {
+                        maxPathLen = estimatedLen;
+                        longestPath = _fileStore.GetFullPath(i);
+                    }
+                }
+
+                if (name != null && name.Length > maxNameLen)
+                {
+                    maxNameLen = name.Length;
+                    longestName = name;
+                }
+            }
+
+            if (!string.IsNullOrEmpty(longestPath))
+                _cachedFullPathWidth = TextRenderer.MeasureText(longestPath, lvFiles.Font).Width + 25;
+            else _cachedFullPathWidth = 400;
+
+            if (!string.IsNullOrEmpty(longestName))
+                _cachedFileNameWidth = TextRenderer.MeasureText(longestName, lvFiles.Font).Width + 25;
+            else _cachedFileNameWidth = 300;
+        }
+
+        private void SetAlgorithm(HashType type)
+        {
+            _currentHashType = type;
+            foreach (var kvp in _algoMenuItems) kvp.Value.Checked = (kvp.Key == type);
+            if (!_isProcessing)
+            {
+                if (_isJobMode)
+                {
+                    this.Text = $"SharpSFV - Job Queue [{_currentHashType}]";
+                }
+                else if (_isVerificationMode)
+                {
+                    this.Text = $"SharpSFV - Verify [{_currentHashType}]";
+                }
+                else
+                {
+                    this.Text = $"SharpSFV [{_currentHashType}]";
+                }
+            }
+        }
+
+        private void SetPathStorageMode(PathStorageMode mode)
+        {
+            _settings.PathStorageMode = mode;
+            if (_menuPathRelative != null) _menuPathRelative.Checked = (mode == PathStorageMode.Relative);
+            if (_menuPathAbsolute != null) _menuPathAbsolute.Checked = (mode == PathStorageMode.Absolute);
+        }
+
+        private void SetProcessingMode(ProcessingMode mode)
+        {
+            _settings.ProcessingMode = mode;
+            if (_menuProcAuto != null) _menuProcAuto.Checked = (mode == ProcessingMode.Auto);
+            if (_menuProcHDD != null) _menuProcHDD.Checked = (mode == ProcessingMode.HDD);
+            if (_menuProcSSD != null) _menuProcSSD.Checked = (mode == ProcessingMode.SSD);
+        }
+
+        private void AddCol(string text, int width, string tag)
+        {
+            ColumnHeader ch = lvFiles.Columns.Add(text, width);
+            ch.Tag = tag;
+            _originalColWidths[ch.Index] = width;
+        }
+
+        private void ToggleTimeColumn()
+        {
+            _settings.ShowTimeTab = _menuViewTime?.Checked ?? false;
+            // Prevent UI Setup in Job Mode
+            if (!_isJobMode) SetupUIForMode(_isVerificationMode ? "Verification" : "Creation");
         }
     }
 }

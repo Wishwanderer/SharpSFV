@@ -7,6 +7,12 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
+using System.Runtime.InteropServices;
+using System.Diagnostics;
+using System.Media;
+using System.IO.Pipes;
+using System.Text;
+using System.IO;
 
 namespace SharpSFV
 {
@@ -49,6 +55,19 @@ namespace SharpSFV
         private HashType _currentHashType = HashType.XXHASH3;
         private CancellationTokenSource? _cts;
 
+        // Headless Mode Flag
+        private bool _isHeadless = false;
+        private string[] _startupArgs;
+
+        // Taskbar Progress
+        private ITaskbarList3? _taskbarList;
+
+        // Context Menu Create Mode (IPC)
+        private bool _isCreateMode = false;
+        private List<string> _collectedPaths = new List<string>();
+        private System.Windows.Forms.Timer? _debounceTimer;
+        private string? _autoSavePath;
+
         // Threading & UI Throttling
         private object _uiLock = new object();
         private long _lastUiUpdateTick = 0;
@@ -66,7 +85,7 @@ namespace SharpSFV
         private Panel? _statsPanel;
         private Panel? _filterPanel;
 
-        // NEW: Comments Panel
+        // Comments Panel
         private Panel? _commentsPanel;
         private TextBox? _txtComments;
 
@@ -101,25 +120,16 @@ namespace SharpSFV
         // Menu References
         private ToolStripMenuItem? _menuViewTime;
         private ToolStripMenuItem? _menuViewShowFullPaths;
-
         private ToolStripMenuItem? _menuOptionsFilter;
         private ToolStripMenuItem? _menuOptionsAdvanced;
-
-        // Processing Mode Menus
         private ToolStripMenuItem? _menuProcAuto;
         private ToolStripMenuItem? _menuProcHDD;
         private ToolStripMenuItem? _menuProcSSD;
-
-        // Path Storage Menus
         private ToolStripMenuItem? _menuPathRelative;
         private ToolStripMenuItem? _menuPathAbsolute;
-
-        // Script Menus
         private ToolStripMenuItem? _menuGenCopyDups;
         private ToolStripMenuItem? _menuGenDelDups;
         private ToolStripMenuItem? _menuGenBadFiles;
-
-        // View Menu References
         private ToolStripMenuItem? _menuViewHash;
         private ToolStripMenuItem? _menuViewExpected;
         private ToolStripMenuItem? _menuViewLockCols;
@@ -142,9 +152,32 @@ namespace SharpSFV
 
         #endregion
 
-        public Form1()
+        public Form1(string[] args)
         {
             InitializeComponent();
+            _startupArgs = args;
+
+            // Create Mode (Shell Integration)
+            if (args.Contains("-create", StringComparer.OrdinalIgnoreCase))
+            {
+                _isCreateMode = true;
+                this.Opacity = 0;
+                this.ShowInTaskbar = false;
+                this.WindowState = FormWindowState.Normal;
+
+                _debounceTimer = new System.Windows.Forms.Timer { Interval = 200 };
+                _debounceTimer.Tick += OnDebounceTick;
+
+                StartPipeServer();
+            }
+            // Check Headless Mode
+            else if (args.Contains("-headless", StringComparer.OrdinalIgnoreCase))
+            {
+                _isHeadless = true;
+                this.Opacity = 0;
+                this.ShowInTaskbar = false;
+                this.WindowState = FormWindowState.Minimized;
+            }
 
             try
             {
@@ -158,6 +191,21 @@ namespace SharpSFV
 
             _settings = new AppSettings(Application.ExecutablePath);
             _settings.Load();
+
+            if (!_isHeadless && !_isCreateMode)
+            {
+                try
+                {
+                    Guid clsid = Guid.Parse("56FDF344-FD6D-11d0-958A-006097C9A090");
+                    Type? type = Type.GetTypeFromCLSID(clsid);
+                    if (type != null)
+                    {
+                        _taskbarList = (ITaskbarList3?)Activator.CreateInstance(type);
+                        _taskbarList?.HrInit();
+                    }
+                }
+                catch { }
+            }
 
             _listSorter = new FileListSorter(_fileStore);
 
@@ -173,15 +221,122 @@ namespace SharpSFV
             this.FormClosing += Form1_FormClosing;
             this.Shown += Form1_Shown;
 
-            // UI Setup methods are now in Form1.UI.Layout.cs
             SetupLayout();
             SetupContextMenu();
             SetupDragDrop();
 
-            ApplySettings();
+            if (!_isHeadless && !_isCreateMode) ApplySettings();
 
-            // Initialize Title
             SetAlgorithm(_currentHashType);
+        }
+
+        private async void StartPipeServer()
+        {
+            while (!_isProcessing && _isCreateMode)
+            {
+                try
+                {
+                    using (var server = new NamedPipeServerStream("SharpSFV_Pipe", PipeDirection.In, 1, PipeTransmissionMode.Byte, PipeOptions.Asynchronous))
+                    {
+                        await server.WaitForConnectionAsync();
+                        using (var reader = new StreamReader(server, Encoding.UTF8))
+                        {
+                            string? line;
+                            while ((line = await reader.ReadLineAsync()) != null)
+                            {
+                                if (!string.IsNullOrWhiteSpace(line) && !line.StartsWith("-"))
+                                {
+                                    this.Invoke(new Action(() => {
+                                        _collectedPaths.Add(line);
+                                        _debounceTimer?.Stop();
+                                        _debounceTimer?.Start();
+                                    }));
+                                }
+                            }
+                        }
+                    }
+                }
+                catch { await Task.Delay(100); }
+            }
+        }
+
+        private void OnDebounceTick(object? sender, EventArgs e)
+        {
+            _debounceTimer?.Stop();
+            LaunchCreateMode();
+        }
+
+        private void LaunchCreateMode()
+        {
+            if (_collectedPaths.Count == 0)
+            {
+                Application.Exit();
+                return;
+            }
+
+            string baseDir = "";
+            if (_collectedPaths.Count == 1 && Directory.Exists(_collectedPaths[0])) baseDir = _collectedPaths[0];
+            else if (_collectedPaths.Count == 1) baseDir = Path.GetDirectoryName(_collectedPaths[0]) ?? "";
+            else baseDir = FindCommonBasePath(_collectedPaths);
+
+            using (SaveFileDialog sfd = new SaveFileDialog())
+            {
+                sfd.Title = "SharpSFV - Create Checksum";
+                sfd.InitialDirectory = baseDir;
+                sfd.FileName = "checksum";
+                sfd.Filter = "SFV File (*.sfv)|*.sfv|MD5 File (*.md5)|*.md5|SHA1 File (*.sha1)|*.sha1|SHA256 File (*.sha256)|*.sha256|xxHash3 (*.xxh3)|*.xxh3";
+
+                sfd.FilterIndex = _settings.DefaultAlgo switch
+                {
+                    HashType.MD5 => 2,
+                    HashType.SHA1 => 3,
+                    HashType.SHA256 => 4,
+                    HashType.XXHASH3 => 5,
+                    _ => 1
+                };
+
+                this.TopMost = true;
+                if (sfd.ShowDialog() != DialogResult.OK)
+                {
+                    Application.Exit();
+                    return;
+                }
+                this.TopMost = false;
+                _autoSavePath = sfd.FileName;
+            }
+
+            SetupMiniLayout();
+
+            string ext = Path.GetExtension(_autoSavePath).ToLower();
+            if (ext == ".md5") _currentHashType = HashType.MD5;
+            else if (ext == ".sha1") _currentHashType = HashType.SHA1;
+            else if (ext == ".sha256") _currentHashType = HashType.SHA256;
+            else if (ext == ".xxh3") _currentHashType = HashType.XXHASH3;
+            else _currentHashType = HashType.Crc32;
+
+            _settings.DefaultAlgo = _currentHashType;
+            _settings.Save(this, false, _currentHashType, -1, null!);
+
+            this.Opacity = 1;
+            this.ShowInTaskbar = true;
+            this.CenterToScreen();
+
+            try
+            {
+                if (_taskbarList == null)
+                {
+                    Guid clsid = Guid.Parse("56FDF344-FD6D-11d0-958A-006097C9A090");
+                    Type? type = Type.GetTypeFromCLSID(clsid);
+                    if (type != null)
+                    {
+                        _taskbarList = (ITaskbarList3?)Activator.CreateInstance(type);
+                        _taskbarList?.HrInit();
+                    }
+                }
+            }
+            catch { }
+
+            _ = RunHashCreation(_collectedPaths.ToArray(), baseDir);
         }
 
         private void EnableDoubleBuffer(Control control)
@@ -193,28 +348,35 @@ namespace SharpSFV
 
         private async void Form1_Shown(object? sender, EventArgs e)
         {
+            if (_isCreateMode) return;
+
             await Task.Delay(100);
-            string[] args = Environment.GetCommandLineArgs();
-            if (args.Length > 1) await HandleDroppedPaths(args.Skip(1).ToArray());
+
+            var pathsToProcess = _startupArgs.Where(a => !a.StartsWith("-")).ToArray();
+
+            if (pathsToProcess.Length > 0)
+            {
+                await HandleDroppedPaths(pathsToProcess);
+            }
         }
 
         private void Form1_FormClosing(object? sender, FormClosingEventArgs e)
         {
             _cts?.Cancel();
             _pauseEvent?.Dispose();
+            _debounceTimer?.Dispose();
 
-            if (_skipSaveOnClose) return;
+            if (_skipSaveOnClose || _isHeadless || _isCreateMode) return;
 
             bool timeEnabled = _menuViewTime?.Checked ?? false;
             _settings.ShowFullPaths = _menuViewShowFullPaths?.Checked ?? false;
-
             _settings.ShowFilterPanel = _menuOptionsFilter?.Checked ?? false;
-
             _settings.ShowAdvancedBar = _menuOptionsAdvanced?.Checked ?? false;
             if (_txtPathPrefix != null) _settings.PathPrefix = _txtPathPrefix.Text;
             if (_txtInclude != null) _settings.IncludePattern = _txtInclude.Text;
             if (_txtExclude != null) _settings.ExcludePattern = _txtExclude.Text;
             if (_chkRecursive != null) _settings.ScanRecursive = _chkRecursive.Checked;
+            if (_chkComments != null) _chkComments.Checked = _settings.EnableChecksumComments;
 
             _settings.ShowHashCol = _menuViewHash?.Checked ?? true;
             _settings.ShowExpectedHashCol = _menuViewExpected?.Checked ?? true;
@@ -222,9 +384,7 @@ namespace SharpSFV
 
             int distToSave = _settings.SplitterDistance;
             if (_mainSplitter != null && !_mainSplitter.Panel1Collapsed && _mainSplitter.SplitterDistance > 0)
-            {
                 distToSave = _mainSplitter.SplitterDistance;
-            }
 
             _settings.Save(this, timeEnabled, _currentHashType, distToSave, lvFiles);
 
@@ -237,106 +397,130 @@ namespace SharpSFV
 
         private void SetProgressBarColor(int state)
         {
+            if (_isHeadless) return;
             Win32Storage.SetProgressBarState(progressBarTotal, state);
         }
 
-        // --- JOB LOGIC ---
+        private void HandleCompletion(int completed, int ok, int bad, int missing, Stopwatch sw, bool verifyMode = false)
+        {
+            bool isCancelled = _cts?.Token.IsCancellationRequested ?? false;
+
+            if (!isCancelled && !_isHeadless)
+            {
+                if (bad > 0 || (missing > 0 && verifyMode)) SystemSounds.Exclamation.Play();
+                else SystemSounds.Asterisk.Play();
+            }
+
+            SetProcessingState(false);
+
+            if (_isHeadless)
+            {
+                Console.WriteLine();
+                Console.WriteLine("------------------------------------------------");
+                Console.WriteLine($"Total: {completed}");
+                Console.WriteLine($"OK: {ok}");
+                Console.WriteLine($"BAD: {bad}");
+                Console.WriteLine($"MISSING: {missing}");
+                Console.WriteLine($"Time: {sw.ElapsedMilliseconds} ms");
+                Console.WriteLine("------------------------------------------------");
+                Application.Exit();
+                return;
+            }
+
+            this.Invoke(new Action(() =>
+            {
+                RecalculateColumnWidths();
+                UpdateStats(completed, _fileStore.Count, ok, bad, missing);
+
+                if (progressBarTotal != null)
+                {
+                    int safeTotal = Math.Max(1, _fileStore.Count);
+                    progressBarTotal.Maximum = safeTotal;
+                    progressBarTotal.Value = Math.Min(completed, safeTotal);
+
+                    int pbState = Win32Storage.PBST_NORMAL;
+                    if (bad > 0 || missing > 0) pbState = Win32Storage.PBST_ERROR;
+                    else if (isCancelled) pbState = Win32Storage.PBST_PAUSED;
+
+                    SetProgressBarColor(pbState);
+
+                    if (_taskbarList != null)
+                    {
+                        try
+                        {
+                            _taskbarList.SetProgressValue(this.Handle, (ulong)completed, (ulong)safeTotal);
+
+                            var flag = (pbState == Win32Storage.PBST_ERROR) ? TbpFlag.Error : TbpFlag.Normal;
+                            if (isCancelled) flag = TbpFlag.Paused;
+                            _taskbarList.SetProgressState(this.Handle, flag);
+                        }
+                        catch { }
+                    }
+                }
+
+                if (verifyMode)
+                {
+                    string algoName = Enum.GetName(typeof(HashType), _currentHashType) ?? "Hash";
+                    this.Text = (bad == 0 && missing == 0)
+                        ? $"SharpSFV [{algoName}] - All Files OK"
+                        : $"SharpSFV [{algoName}] - {bad} Bad, {missing} Missing";
+                }
+                else
+                {
+                    this.Text = $"SharpSFV - Creation Complete [{_currentHashType}]";
+
+                    if (_isCreateMode && !string.IsNullOrEmpty(_autoSavePath) && !isCancelled)
+                    {
+                        SaveResultsToFile(_autoSavePath);
+                        Application.Exit();
+                    }
+                }
+
+                if (_settings.ShowTimeTab && !isCancelled && _lblTotalTime != null)
+                {
+                    _lblTotalTime.Text = $"Total Elapsed Time: {sw.ElapsedMilliseconds} ms";
+                    _lblTotalTime.Visible = true;
+                }
+
+                lvFiles.Invalidate();
+            }));
+        }
+
+        private void SaveResultsToFile(string path)
+        {
+            try
+            {
+                using (StreamWriter sw = new StreamWriter(path))
+                {
+                    if (_settings.EnableChecksumComments)
+                    {
+                        sw.WriteLine($"; Generated by SharpSFV (Signature: {_settings.CustomSignature})");
+                        sw.WriteLine($"; Algorithm: {_currentHashType}");
+                    }
+
+                    for (int i = 0; i < _fileStore.Count; i++)
+                    {
+                        if (_fileStore.IsSummaryRows[i]) continue;
+                        string hash = _fileStore.GetCalculatedHashString(i);
+                        if (!hash.Contains("...") && !string.IsNullOrEmpty(hash))
+                        {
+                            string fullPath = _fileStore.GetFullPath(i);
+                            string relPath = _fileStore.RelativePaths[i] ?? Path.GetFileName(fullPath);
+                            sw.WriteLine($"{hash} *{relPath}");
+                        }
+                    }
+                }
+            }
+            catch (Exception ex) { MessageBox.Show("Error saving: " + ex.Message); }
+        }
 
         private void PerformClearCompletedJobs()
         {
             if (!_isJobMode) return;
-
             _jobStore.RemoveCompleted();
             lvFiles.VirtualListSize = _jobStore.Count;
             lvFiles.Invalidate();
             UpdateJobStats();
-        }
-
-        // NOTE: UpdateJobStats, SetAppMode, UpdateStats moved to Form1.UI.Layout.cs to avoid duplicates.
-
-        private void AddCol(string text, int width, string tag)
-        {
-            ColumnHeader ch = lvFiles.Columns.Add(text, width);
-            ch.Tag = tag;
-            _originalColWidths[ch.Index] = width;
-        }
-
-        private void ToggleShowFullPaths(bool toggle = true)
-        {
-            if (toggle) _settings.ShowFullPaths = !_settings.ShowFullPaths;
-
-            if (_menuViewShowFullPaths != null) _menuViewShowFullPaths.Checked = _settings.ShowFullPaths;
-
-            RecalculateColumnWidths();
-
-            int nameColIdx = -1;
-            foreach (ColumnHeader ch in lvFiles.Columns)
-            {
-                if (ch.Tag as string == "Name") { nameColIdx = ch.Index; break; }
-            }
-
-            if (nameColIdx != -1)
-            {
-                if (_settings.ShowFullPaths) lvFiles.Columns[nameColIdx].Width = _cachedFullPathWidth;
-                else
-                {
-                    _originalColWidths[nameColIdx] = _cachedFileNameWidth;
-                    lvFiles.Columns[nameColIdx].Width = _cachedFileNameWidth;
-                }
-            }
-            lvFiles.Invalidate();
-        }
-
-        private void ToggleAdvancedBar()
-        {
-            _settings.ShowAdvancedBar = _menuOptionsAdvanced?.Checked ?? false;
-            if (_advancedPanel != null) _advancedPanel.Visible = _settings.ShowAdvancedBar;
-        }
-
-        private void RecalculateColumnWidths()
-        {
-            if (_fileStore.Count == 0)
-            {
-                _cachedFullPathWidth = 400;
-                _cachedFileNameWidth = 300;
-                return;
-            }
-
-            string longestPath = "";
-            string longestName = "";
-            int maxPathLen = -1;
-            int maxNameLen = -1;
-
-            for (int i = 0; i < _fileStore.Count; i++)
-            {
-                string? baseDir = _fileStore.BaseDirectories[i];
-                string? relPath = _fileStore.RelativePaths[i];
-                string? name = _fileStore.FileNames[i];
-
-                if (baseDir != null && relPath != null)
-                {
-                    int estimatedLen = baseDir.Length + relPath.Length + 1;
-                    if (estimatedLen > maxPathLen)
-                    {
-                        maxPathLen = estimatedLen;
-                        longestPath = _fileStore.GetFullPath(i);
-                    }
-                }
-
-                if (name != null && name.Length > maxNameLen)
-                {
-                    maxNameLen = name.Length;
-                    longestName = name;
-                }
-            }
-
-            if (!string.IsNullOrEmpty(longestPath))
-                _cachedFullPathWidth = TextRenderer.MeasureText(longestPath, lvFiles.Font).Width + 25;
-            else _cachedFullPathWidth = 400;
-
-            if (!string.IsNullOrEmpty(longestName))
-                _cachedFileNameWidth = TextRenderer.MeasureText(longestName, lvFiles.Font).Width + 25;
-            else _cachedFileNameWidth = 300;
         }
     }
 }

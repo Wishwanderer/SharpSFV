@@ -6,6 +6,7 @@ using System.IO;
 using System.Linq;
 using System.Text;
 using System.Windows.Forms;
+using Microsoft.Win32;
 using SharpSFV.Models;
 using SharpSFV.Interop;
 using SharpSFV.Utils;
@@ -14,6 +15,174 @@ namespace SharpSFV
 {
     public partial class Form1
     {
+        // --- SHELL INTEGRATION ACTIONS ---
+
+        private void PerformRegisterShell()
+        {
+            try
+            {
+                string exePath = Application.ExecutablePath;
+                string verifyCommand = $"\"{exePath}\" \"%1\"";
+                string createCommand = $"\"{exePath}\" -create \"%1\"";
+
+                using (var key = Registry.CurrentUser.CreateSubKey(@"Software\Classes\Directory\shell\SharpSFV"))
+                {
+                    key.SetValue("", "SharpSFV: Create Checksum");
+                    key.SetValue("Icon", exePath);
+                    using (var cmd = key.CreateSubKey("command")) cmd.SetValue("", createCommand);
+                }
+
+                using (var key = Registry.CurrentUser.CreateSubKey(@"Software\Classes\*\shell\SharpSFV"))
+                {
+                    key.SetValue("", "SharpSFV: Create Checksum");
+                    key.SetValue("Icon", exePath);
+                    using (var cmd = key.CreateSubKey("command")) cmd.SetValue("", createCommand);
+                }
+
+                using (var key = Registry.CurrentUser.CreateSubKey(@"Software\Classes\.sfv")) key.SetValue("", "SharpSFV.File");
+
+                using (var key = Registry.CurrentUser.CreateSubKey(@"Software\Classes\SharpSFV.File"))
+                {
+                    key.SetValue("", "SFV Checksum File");
+                    using (var shell = key.CreateSubKey(@"shell\open\command")) shell.SetValue("", verifyCommand);
+                    using (var icon = key.CreateSubKey("DefaultIcon")) icon.SetValue("", exePath + ",0");
+                }
+
+                MessageBox.Show("Shell integration registered successfully!\n\nYou can now Right-Click files or folders to create checksums.", "SharpSFV", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show($"Error registering shell extension: {ex.Message}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        }
+
+        private void PerformUnregisterShell()
+        {
+            try
+            {
+                Registry.CurrentUser.DeleteSubKeyTree(@"Software\Classes\Directory\shell\SharpSFV", false);
+                Registry.CurrentUser.DeleteSubKeyTree(@"Software\Classes\*\shell\SharpSFV", false);
+                Registry.CurrentUser.DeleteSubKeyTree(@"Software\Classes\SharpSFV.File", false);
+                MessageBox.Show("Shell integration removed.", "SharpSFV", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show($"Error removing shell extension: {ex.Message}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        }
+
+        // --- SMART BAD FILE ACTIONS ---
+
+        private void PerformMoveBadFiles()
+        {
+            if (_fileStore.Count == 0) return;
+            if (MessageBox.Show("This will move all files marked as BAD or ERROR to a '_BAD_FILES' subfolder in their respective locations.\n\nContinue?",
+                "Move Bad Files", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes) return;
+
+            Cursor.Current = Cursors.WaitCursor;
+            int movedCount = 0;
+            int errorCount = 0;
+
+            try
+            {
+                for (int i = 0; i < _fileStore.Count; i++)
+                {
+                    var status = _fileStore.Statuses[i];
+                    if (status == ItemStatus.Bad || status == ItemStatus.Error)
+                    {
+                        try
+                        {
+                            string fullPath = _fileStore.GetFullPath(i);
+                            if (!File.Exists(fullPath)) continue;
+
+                            string? dir = Path.GetDirectoryName(fullPath);
+                            if (dir == null) continue;
+
+                            string badDir = Path.Combine(dir, "_BAD_FILES");
+                            if (!Directory.Exists(badDir)) Directory.CreateDirectory(badDir);
+
+                            string fileName = Path.GetFileName(fullPath);
+                            string destPath = Path.Combine(badDir, fileName);
+
+                            if (File.Exists(destPath))
+                            {
+                                string timestamp = DateTime.Now.ToString("yyyyMMddHHmmss");
+                                destPath = Path.Combine(badDir, $"{Path.GetFileNameWithoutExtension(fileName)}_{timestamp}{Path.GetExtension(fileName)}");
+                            }
+
+                            File.Move(fullPath, destPath);
+
+                            string? oldRel = _fileStore.RelativePaths[i];
+                            if (oldRel != null)
+                            {
+                                string? relDir = Path.GetDirectoryName(oldRel);
+                                string newRel = string.IsNullOrEmpty(relDir)
+                                    ? Path.Combine("_BAD_FILES", fileName)
+                                    : Path.Combine(relDir, "_BAD_FILES", fileName);
+
+                                _fileStore.RelativePaths[i] = newRel;
+                            }
+                            movedCount++;
+                        }
+                        catch { errorCount++; }
+                    }
+                }
+            }
+            finally
+            {
+                Cursor.Current = Cursors.Default;
+                lvFiles.Invalidate();
+            }
+
+            MessageBox.Show($"Operation Complete.\nMoved: {movedCount}\nErrors: {errorCount}", "Move Bad Files", MessageBoxButtons.OK, MessageBoxIcon.Information);
+        }
+
+        private void PerformRenameBadFiles()
+        {
+            if (_fileStore.Count == 0) return;
+            if (MessageBox.Show("This will append '.CORRUPT' to all files marked as BAD or ERROR.\n\nContinue?",
+                "Rename Bad Files", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes) return;
+
+            Cursor.Current = Cursors.WaitCursor;
+            int renamedCount = 0;
+            int errorCount = 0;
+
+            try
+            {
+                for (int i = 0; i < _fileStore.Count; i++)
+                {
+                    var status = _fileStore.Statuses[i];
+                    if (status == ItemStatus.Bad || status == ItemStatus.Error)
+                    {
+                        try
+                        {
+                            string fullPath = _fileStore.GetFullPath(i);
+                            if (!File.Exists(fullPath)) continue;
+
+                            string newPath = fullPath + ".CORRUPT";
+                            File.Move(fullPath, newPath);
+
+                            string? oldName = _fileStore.FileNames[i];
+                            if (oldName != null) _fileStore.FileNames[i] = oldName + ".CORRUPT";
+
+                            string? oldRel = _fileStore.RelativePaths[i];
+                            if (oldRel != null) _fileStore.RelativePaths[i] = oldRel + ".CORRUPT";
+
+                            renamedCount++;
+                        }
+                        catch { errorCount++; }
+                    }
+                }
+            }
+            finally
+            {
+                Cursor.Current = Cursors.Default;
+                lvFiles.Invalidate();
+            }
+
+            MessageBox.Show($"Operation Complete.\nRenamed: {renamedCount}\nErrors: {errorCount}", "Rename Bad Files", MessageBoxButtons.OK, MessageBoxIcon.Information);
+        }
+
         // --- CONTROL ACTIONS (PAUSE / CANCEL) ---
 
         private void PerformTogglePause()
@@ -22,15 +191,13 @@ namespace SharpSFV
 
             if (_isPaused)
             {
-                // --- RESUME ACTION ---
                 _isPaused = false;
                 if (_btnPause != null)
                 {
                     _btnPause.Text = "Pause";
-                    _btnPause.ForeColor = SystemColors.ControlText; // Standard Color
+                    _btnPause.ForeColor = SystemColors.ControlText;
                 }
 
-                // Job Mode Visuals: Flip Paused -> InProgress
                 if (_isJobMode)
                 {
                     for (int i = 0; i < _jobStore.Count; i++)
@@ -44,20 +211,18 @@ namespace SharpSFV
                     }
                 }
 
-                SetProgressBarColor(Win32Storage.PBST_NORMAL); // Green
-                _pauseEvent.Set(); // Unblock threads
+                SetProgressBarColor(Win32Storage.PBST_NORMAL);
+                _pauseEvent.Set();
             }
             else
             {
-                // --- PAUSE ACTION ---
                 _isPaused = true;
                 if (_btnPause != null)
                 {
                     _btnPause.Text = "Resume";
-                    _btnPause.ForeColor = Color.DarkGoldenrod; // Visual cue for active pause
+                    _btnPause.ForeColor = Color.DarkGoldenrod;
                 }
 
-                // Job Mode Visuals: Flip InProgress -> Paused
                 if (_isJobMode)
                 {
                     for (int i = 0; i < _jobStore.Count; i++)
@@ -71,29 +236,69 @@ namespace SharpSFV
                     }
                 }
 
-                SetProgressBarColor(Win32Storage.PBST_PAUSED); // Yellow
-                _pauseEvent.Reset(); // Block threads
+                SetProgressBarColor(Win32Storage.PBST_PAUSED);
+                _pauseEvent.Reset();
             }
         }
 
         private void PerformCancelAction()
         {
             if (!_isProcessing) return;
+            if (_isPaused) _pauseEvent.Set();
+            _cts?.Cancel();
+            Application.Restart();
+            Environment.Exit(0);
+        }
 
-            if (MessageBox.Show("Are you sure you want to cancel the current operation?",
-                "Cancel Operation", MessageBoxButtons.YesNo, MessageBoxIcon.Question) == DialogResult.Yes)
+        private void PerformCompareClipboard()
+        {
+            try
             {
-                // If paused, resume first so threads can exit/cancel properly
-                if (_isPaused) _pauseEvent.Set();
+                string text = Clipboard.GetText().Trim();
+                if (string.IsNullOrEmpty(text)) return;
 
-                // Signal cancellation to background tasks
-                _cts?.Cancel();
+                if (!System.Text.RegularExpressions.Regex.IsMatch(text, "^[0-9a-fA-F]+$"))
+                {
+                    MessageBox.Show("Clipboard does not contain a valid Hex hash.", "Invalid Hash", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    return;
+                }
 
-                // RESTART APPLICATION LOGIC
-                // We rely on FormClosing to save the current settings (Window position, etc.)
-                // Then we restart to ensure a completely clean state (RAM/Handles).
-                Application.Restart();
-                Environment.Exit(0);
+                int targetIdx = -1;
+                if (lvFiles.SelectedIndices.Count == 1) targetIdx = _displayIndices[lvFiles.SelectedIndices[0]];
+                else if (_fileStore.Count == 1) targetIdx = 0;
+
+                if (targetIdx == -1)
+                {
+                    MessageBox.Show("Please select a single file to compare, or filter the list to one item.", "Selection Required", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    return;
+                }
+
+                if (text.Length % 2 != 0) text = "0" + text;
+
+                byte[] expectedBytes;
+                try { expectedBytes = Convert.FromHexString(text); }
+                catch
+                {
+                    MessageBox.Show("Could not parse clipboard text as a Hex string.", "Parse Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    return;
+                }
+
+                _fileStore.ExpectedHashes[targetIdx] = expectedBytes;
+
+                if (_fileStore.CalculatedHashes[targetIdx] != null)
+                {
+                    bool match = _fileStore.CalculatedHashes[targetIdx].SequenceEqual(expectedBytes);
+                    _fileStore.Statuses[targetIdx] = match ? ItemStatus.OK : ItemStatus.Bad;
+
+                    if (match) System.Media.SystemSounds.Asterisk.Play();
+                    else System.Media.SystemSounds.Hand.Play();
+                }
+
+                lvFiles.Invalidate();
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show($"Error reading clipboard: {ex.Message}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
         }
 
@@ -106,129 +311,6 @@ namespace SharpSFV
 
             string fullPath = _fileStore.GetFullPath(storeIndex);
             try { Process.Start("explorer.exe", $"/select,\"{fullPath}\""); } catch { }
-        }
-
-        private void CtxCopyPath_Click(object? sender, EventArgs e)
-        {
-            if (lvFiles.SelectedIndices.Count > 0)
-            {
-                int uiIndex = lvFiles.SelectedIndices[0];
-                int storeIndex = _displayIndices[uiIndex];
-                Clipboard.SetText(_fileStore.GetFullPath(storeIndex));
-            }
-        }
-
-        private void CtxCopyHash_Click(object? sender, EventArgs e)
-        {
-            if (lvFiles.SelectedIndices.Count > 0)
-            {
-                int uiIndex = lvFiles.SelectedIndices[0];
-                int storeIndex = _displayIndices[uiIndex];
-                Clipboard.SetText(_fileStore.GetCalculatedHashString(storeIndex));
-            }
-        }
-
-        private void CtxRename_Click(object? sender, EventArgs e)
-        {
-            if (lvFiles.SelectedIndices.Count != 1) return;
-
-            int uiIndex = lvFiles.SelectedIndices[0];
-            int storeIndex = _displayIndices[uiIndex];
-
-            string currentPath = _fileStore.GetFullPath(storeIndex);
-            string currentName = _fileStore.FileNames[storeIndex] ?? "";
-
-            string newName = SimpleInputDialog.ShowDialog("Rename File", "Enter new filename:", currentName);
-
-            if (!string.IsNullOrWhiteSpace(newName) && newName != currentName)
-            {
-                try
-                {
-                    string baseDir = _fileStore.BaseDirectories[storeIndex] ?? "";
-                    string? fileDir = Path.GetDirectoryName(currentPath);
-                    if (fileDir == null) fileDir = baseDir;
-
-                    string newPath = Path.Combine(fileDir, newName);
-
-                    File.Move(currentPath, newPath);
-
-                    _fileStore.FileNames[storeIndex] = newName;
-
-                    string oldRel = _fileStore.RelativePaths[storeIndex] ?? currentName;
-                    string? relDir = Path.GetDirectoryName(oldRel);
-                    string newRel = string.IsNullOrEmpty(relDir) ? newName : Path.Combine(relDir, newName);
-
-                    _fileStore.RelativePaths[storeIndex] = newRel;
-
-                    lvFiles.Invalidate();
-                }
-                catch (Exception ex) { MessageBox.Show(ex.Message); }
-            }
-        }
-
-        private void CtxDelete_Click(object? sender, EventArgs e)
-        {
-            if (lvFiles.SelectedIndices.Count != 1) return;
-
-            int uiIndex = lvFiles.SelectedIndices[0];
-            int storeIndex = _displayIndices[uiIndex];
-            string fullPath = _fileStore.GetFullPath(storeIndex);
-
-            if (MessageBox.Show("Delete file from disk?", "Confirm", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) == DialogResult.Yes)
-            {
-                try
-                {
-                    File.Delete(fullPath);
-
-                    _fileStore.RemoveAt(storeIndex);
-                    _displayIndices.RemoveAt(uiIndex);
-
-                    for (int i = 0; i < _displayIndices.Count; i++)
-                    {
-                        if (_displayIndices[i] > storeIndex) _displayIndices[i]--;
-                    }
-
-                    UpdateDisplayList();
-                }
-                catch (Exception ex) { MessageBox.Show($"Could not delete file: {ex.Message}"); }
-            }
-        }
-
-        private void CtxRemoveList_Click(object? sender, EventArgs e)
-        {
-            if (lvFiles.SelectedIndices.Count == 0) return;
-
-            lvFiles.BeginUpdate();
-
-            var indicesToRemove = new List<int>();
-            foreach (int uiIdx in lvFiles.SelectedIndices)
-            {
-                indicesToRemove.Add(_displayIndices[uiIdx]);
-            }
-            indicesToRemove.Sort();
-
-            for (int i = indicesToRemove.Count - 1; i >= 0; i--)
-            {
-                _fileStore.RemoveAt(indicesToRemove[i]);
-            }
-
-            _displayIndices.Clear();
-            for (int i = 0; i < _fileStore.Count; i++) _displayIndices.Add(i);
-
-            UpdateDisplayList();
-            lvFiles.EndUpdate();
-        }
-
-        // --- MAIN MENU ACTIONS ---
-
-        private void PerformSelectAllAction()
-        {
-            lvFiles.BeginUpdate();
-            for (int i = 0; i < lvFiles.VirtualListSize; i++)
-            {
-                lvFiles.Items[i].Selected = true;
-            }
-            lvFiles.EndUpdate();
         }
 
         private void PerformCopyAction()
@@ -248,11 +330,28 @@ namespace SharpSFV
             }
             else
             {
+                // Format: <HASH> *<PATH>
                 foreach (int index in lvFiles.SelectedIndices)
                 {
                     int storeIdx = _displayIndices[index];
-                    string name = _fileStore.FileNames[storeIdx] ?? "";
-                    sb.AppendLine($"{name}\t{_fileStore.GetCalculatedHashString(storeIdx)}\t{_fileStore.Statuses[storeIdx]}");
+                    string hash = _fileStore.GetCalculatedHashString(storeIdx);
+
+                    // Logic: If Hash is "Pending" or empty, use status or keep empty, but for copying entry usually implies creating an SFV line.
+                    // If it's effectively empty/pending, we still write the line structure.
+                    if (string.IsNullOrEmpty(hash) || hash == "Pending") hash = "";
+
+                    string path;
+                    if (_settings.ShowFullPaths)
+                    {
+                        path = _fileStore.GetFullPath(storeIdx);
+                    }
+                    else
+                    {
+                        // Use Relative path or just filename if relative is missing
+                        path = _fileStore.RelativePaths[storeIdx] ?? _fileStore.FileNames[storeIdx] ?? "";
+                    }
+
+                    sb.AppendLine($"{hash} *{path}");
                 }
             }
 
@@ -319,7 +418,6 @@ namespace SharpSFV
                         string saveDirectory = Path.GetDirectoryName(sfd.FileName) ?? initialDirectory;
                         using (StreamWriter sw = new StreamWriter(sfd.FileName))
                         {
-                            // NEW: Check setting before writing comments
                             if (_settings.EnableChecksumComments)
                             {
                                 sw.WriteLine($"; Generated by SharpSFV (Signature: {_settings.CustomSignature})");
@@ -500,6 +598,132 @@ namespace SharpSFV
 
         // --- DIALOG HELPERS ---
 
+        private void CtxRename_Click(object? sender, EventArgs e)
+        {
+            if (lvFiles.SelectedIndices.Count != 1) return;
+
+            int uiIndex = lvFiles.SelectedIndices[0];
+            int storeIndex = _displayIndices[uiIndex];
+
+            string currentPath = _fileStore.GetFullPath(storeIndex);
+            string currentName = _fileStore.FileNames[storeIndex] ?? "";
+
+            string newName = SimpleInputDialog.ShowDialog("Rename File", "Enter new filename:", currentName);
+
+            if (!string.IsNullOrWhiteSpace(newName) && newName != currentName)
+            {
+                try
+                {
+                    string baseDir = _fileStore.BaseDirectories[storeIndex] ?? "";
+                    string? fileDir = Path.GetDirectoryName(currentPath);
+                    if (fileDir == null) fileDir = baseDir;
+
+                    string newPath = Path.Combine(fileDir, newName);
+
+                    File.Move(currentPath, newPath);
+
+                    _fileStore.FileNames[storeIndex] = newName;
+
+                    string oldRel = _fileStore.RelativePaths[storeIndex] ?? currentName;
+                    string? relDir = Path.GetDirectoryName(oldRel);
+                    string newRel = string.IsNullOrEmpty(relDir) ? newName : Path.Combine(relDir, newName);
+
+                    _fileStore.RelativePaths[storeIndex] = newRel;
+
+                    lvFiles.Invalidate();
+                }
+                catch (Exception ex) { MessageBox.Show(ex.Message); }
+            }
+        }
+
+        private void CtxDelete_Click(object? sender, EventArgs e)
+        {
+            if (lvFiles.SelectedIndices.Count == 0) return;
+
+            int count = lvFiles.SelectedIndices.Count;
+            if (MessageBox.Show($"Delete {count} file(s) from disk?", "Confirm Delete", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) == DialogResult.Yes)
+            {
+                // Gather UI indices first
+                var uiIndices = new List<int>();
+                foreach (int idx in lvFiles.SelectedIndices) uiIndices.Add(idx);
+                // Sort descending to remove without invalidating subsequent indices
+                uiIndices.Sort((a, b) => b.CompareTo(a));
+
+                lvFiles.BeginUpdate();
+                try
+                {
+                    foreach (int uiIndex in uiIndices)
+                    {
+                        if (uiIndex >= _displayIndices.Count) continue;
+                        int storeIndex = _displayIndices[uiIndex];
+                        string fullPath = _fileStore.GetFullPath(storeIndex);
+
+                        try
+                        {
+                            if (File.Exists(fullPath)) File.Delete(fullPath);
+
+                            // Remove from Store and Display List
+                            _fileStore.RemoveAt(storeIndex);
+                            _displayIndices.RemoveAt(uiIndex);
+
+                            // Shift subsequent display indices
+                            for (int i = 0; i < _displayIndices.Count; i++)
+                            {
+                                if (_displayIndices[i] > storeIndex) _displayIndices[i]--;
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            // On error, maybe skip this file but continue loop? Or stop?
+                            // For bulk delete, usually better to continue or show error at end.
+                            // Here we just log to debug for now.
+                            Debug.WriteLine($"Failed to delete {fullPath}: {ex.Message}");
+                        }
+                    }
+                }
+                finally
+                {
+                    UpdateDisplayList();
+                    lvFiles.EndUpdate();
+                }
+            }
+        }
+
+        private void CtxRemoveList_Click(object? sender, EventArgs e)
+        {
+            if (lvFiles.SelectedIndices.Count == 0) return;
+
+            lvFiles.BeginUpdate();
+
+            var indicesToRemove = new List<int>();
+            foreach (int uiIdx in lvFiles.SelectedIndices)
+            {
+                indicesToRemove.Add(_displayIndices[uiIdx]);
+            }
+            indicesToRemove.Sort();
+
+            for (int i = indicesToRemove.Count - 1; i >= 0; i--)
+            {
+                _fileStore.RemoveAt(indicesToRemove[i]);
+            }
+
+            _displayIndices.Clear();
+            for (int i = 0; i < _fileStore.Count; i++) _displayIndices.Add(i);
+
+            UpdateDisplayList();
+            lvFiles.EndUpdate();
+        }
+
+        private void PerformSelectAllAction()
+        {
+            lvFiles.BeginUpdate();
+            for (int i = 0; i < lvFiles.VirtualListSize; i++)
+            {
+                lvFiles.Items[i].Selected = true;
+            }
+            lvFiles.EndUpdate();
+        }
+
         private void ShowDiskDebugInfo()
         {
             string pathToCheck = Application.ExecutablePath;
@@ -558,7 +782,7 @@ namespace SharpSFV
 
             Label lbl = new Label
             {
-                Text = "SharpSFV v2.54\nInspired by QuickSFV\n\nCreated by L33T.",
+                Text = "SharpSFV v2.6\nInspired by QuickSFV\n\nCreated by L33T.",
                 AutoSize = false,
                 TextAlign = ContentAlignment.MiddleCenter,
                 Dock = DockStyle.Top,

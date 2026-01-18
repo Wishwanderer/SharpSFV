@@ -4,7 +4,7 @@ using System.IO;
 namespace SharpSFV
 {
     /// <summary>
-    /// OPTIMIZATION #2: Structure of Arrays (SoA) Architecture.
+    /// Structure of Arrays (SoA) Architecture.
     /// Replaces List<FileItemData>.
     /// Stores data in parallel arrays to improve CPU cache locality,
     /// eliminate object header overhead (16 bytes per file), and reduce GC pressure.

@@ -1,10 +1,12 @@
 ﻿using SharpSFV.Models;
+using SharpSFV.Interop;
 using System;
 using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
 using System.Windows.Forms;
 using System.Collections.Generic;
+using System.Media;
 
 namespace SharpSFV
 {
@@ -32,10 +34,6 @@ namespace SharpSFV
             string[]? paths = (string[]?)e.Data!.GetData(DataFormats.FileDrop);
             if (paths != null && paths.Length > 0)
             {
-                // CRITICAL FIX: Catch TaskCanceledException here.
-                // When "Stop" is clicked, the Cancellation Token throws an exception 
-                // back up the stack. Since this is an 'async void' event handler, 
-                // an unhandled exception here crashes the app immediately.
                 try
                 {
                     await HandleDroppedPaths(paths);
@@ -85,7 +83,7 @@ namespace SharpSFV
                     // MULTI ITEM LOGIC:
                     // Find common base. Checksum saves in that common base.
                     var parentDirs = paths.Select(p => Path.GetDirectoryName(p) ?? p).ToList();
-                    baseDir = FindCommonBasePath(parentDirs);
+                    baseDir = FindCommonBasePath(parentDirs); // Logic now resides in Form1.Processing.cs
                     try
                     {
                         if (!string.IsNullOrEmpty(baseDir))
@@ -131,6 +129,42 @@ namespace SharpSFV
 
                     await RunHashCreation(paths, baseDirectory);
                 }
+            }
+        }
+
+        private void SetProcessingState(bool processing)
+        {
+            _isProcessing = processing;
+
+            if (this.InvokeRequired)
+            {
+                this.BeginInvoke(new Action(() => SetProcessingState(processing)));
+                return;
+            }
+
+            // Enable/Disable Control Buttons
+            if (_btnStop != null) _btnStop.Enabled = processing;
+
+            if (_btnPause != null)
+            {
+                _btnPause.Enabled = processing;
+                if (processing)
+                {
+                    _btnPause.Text = "Pause";
+                    _isPaused = false;
+                    _pauseEvent.Set(); // Ensure we start running
+                    Win32Storage.SetProgressBarState(progressBarTotal, Win32Storage.PBST_NORMAL); // Green
+                }
+            }
+
+            // Disable Mode Switching while active
+            // Prevents state corruption (e.g., clearing lists while engine is writing)
+            if (_menuModeStandard != null) _menuModeStandard.Enabled = !processing;
+            if (_menuModeJob != null) _menuModeJob.Enabled = !processing;
+
+            if (processing && _lblTotalTime != null)
+            {
+                _lblTotalTime.Text = "";
             }
         }
     }

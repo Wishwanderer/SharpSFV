@@ -56,7 +56,7 @@ namespace SharpSFV
                     };
                     item.SubItems.Add(statusStr);
 
-                    // Column 4: Time (NEW)
+                    // Column 4: Time
                     item.SubItems.Add(_jobStore.TimeStrs[idx]);
 
                     // Colors
@@ -161,7 +161,7 @@ namespace SharpSFV
             UpdateSortVisuals(e.Column, _listSorter.Order);
             Cursor = Cursors.WaitCursor;
 
-            // FIX: Removed Task.Run. 
+            // Removed Task.Run. 
             // Sorting List<int> (even 500k items) is extremely fast (<100ms) and should be done on UI thread 
             // to avoid race conditions with RetrieveVirtualItem which reads this list simultaneously.
             try

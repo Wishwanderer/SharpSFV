@@ -1,50 +1,61 @@
-﻿using System;
+﻿using SharpSFV.Interop;
+using SharpSFV.Models;
+using SharpSFV.Utils;
+using System;
+using System.Buffers;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Runtime;
 using System.Security.Cryptography;
+using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Channels;
 using System.Threading.Tasks;
 using System.Windows.Forms;
-using System.Text; // Required for StringBuilder
-using System.Buffers;
-using SharpSFV.Interop;
-using SharpSFV.Models;
-using SharpSFV.Utils;
 
 namespace SharpSFV
 {
     public partial class Form1
     {
+        // --- METRICS STATE ---
+        private long _totalBytesDetected = 0;
+        private long _processedBytes = 0;
+        private long _lastSpeedBytes = 0;
+        private long _lastSpeedTick = 0;
+        private string _cachedSpeedString = "";
+
         // --- STANDARD WRAPPER ---
         private async Task RunHashCreation(string[] paths, string baseDirectory)
         {
             SetProcessingState(true);
 
-            // Standard Mode Setup
-            SetupUIForMode("Creation");
+            // Reset Metrics
+            _totalBytesDetected = 0;
+            _processedBytes = 0;
+            _lastSpeedBytes = 0;
+            _lastSpeedTick = Environment.TickCount64;
+            _cachedSpeedString = "";
 
-            // Hide comments in Creation mode
-            if (_commentsPanel != null) _commentsPanel.Visible = false;
+            // UI Setup: Skip for Headless or Create Mode (Mini UI)
+            if (!_isHeadless && !_isCreateMode)
+            {
+                SetupUIForMode("Creation");
+                if (_commentsPanel != null) _commentsPanel.Visible = false;
+            }
 
             _fileStore.Clear();
             _displayIndices.Clear();
-            UpdateDisplayList();
+
+            // Display List: Skip for Headless/Create Mode (No List View)
+            if (!_isHeadless && !_isCreateMode) UpdateDisplayList();
 
             // Determine Processing Mode
             bool isHDD = false;
-            if (_settings.ProcessingMode == ProcessingMode.HDD)
-            {
-                isHDD = true;
-            }
-            else if (_settings.ProcessingMode == ProcessingMode.SSD)
-            {
-                isHDD = false;
-            }
+            if (_settings.ProcessingMode == ProcessingMode.HDD) isHDD = true;
+            else if (_settings.ProcessingMode == ProcessingMode.SSD) isHDD = false;
             else // Auto
             {
                 if (paths.Length > 0)
@@ -54,11 +65,13 @@ namespace SharpSFV
                 }
             }
 
-            this.Text = $"SharpSFV - Creating... [{(isHDD ? "HDD/Seq" : "SSD/Par")}]";
+            if (!_isHeadless && !_isCreateMode)
+                this.Text = $"SharpSFV - Creating... [{(isHDD ? "HDD/Seq" : "SSD/Par")}]";
+            else if (_isHeadless)
+                Console.WriteLine($"Mode: {(isHDD ? "HDD (Sequential)" : "SSD (Parallel)")}");
 
             Stopwatch globalSw = Stopwatch.StartNew();
 
-            // Execute Engine with UI updates ENABLED (true)
             int completed = await ExecuteHashingEngine(paths, baseDirectory, isHDD, true, (curr, total, ok, bad) =>
             {
                 ThrottledUiUpdate(curr, total, ok, 0, bad);
@@ -80,7 +93,6 @@ namespace SharpSFV
                 {
                     int currentJobIdx = -1;
 
-                    // FIFO: Find next Queued job
                     for (int i = 0; i < _jobStore.Count; i++)
                     {
                         if (_jobStore.Statuses[i] == JobStatus.Queued)
@@ -90,38 +102,41 @@ namespace SharpSFV
                         }
                     }
 
-                    if (currentJobIdx == -1) break; // No more jobs
+                    if (currentJobIdx == -1) break;
 
-                    // FIX: Ensure UI controls (Pause/Stop) are enabled when we find work
                     if (!_isProcessing) SetProcessingState(true);
 
                     _jobStore.UpdateStatus(currentJobIdx, JobStatus.InProgress);
 
-                    // Update Stats (One-off, no throttling needed for status change)
-                    this.BeginInvoke(new Action(() => {
-                        lvFiles.Invalidate();
-                        UpdateJobStats();
-                    }));
+                    if (!_isHeadless)
+                    {
+                        this.BeginInvoke(new Action(() => {
+                            lvFiles.Invalidate();
+                            UpdateJobStats();
+                        }));
+                    }
+                    else
+                    {
+                        Console.WriteLine($"Starting Job: {_jobStore.Names[currentJobIdx]}");
+                    }
 
                     string[] inputs = _jobStore.InputPaths[currentJobIdx];
                     string rootPath = _jobStore.RootPaths[currentJobIdx];
                     int jobId = _jobStore.Ids[currentJobIdx];
                     string jobName = _jobStore.Names[currentJobIdx];
 
-                    // Start Timing the Job
+                    // Reset Job Metrics
+                    _totalBytesDetected = 0;
+                    _processedBytes = 0;
+                    _lastSpeedBytes = 0;
+                    _lastSpeedTick = Environment.TickCount64;
+
                     Stopwatch jobSw = Stopwatch.StartNew();
 
-                    // Determine Processing Mode for this Job
                     bool isHDD = false;
-                    if (_settings.ProcessingMode == ProcessingMode.HDD)
-                    {
-                        isHDD = true;
-                    }
-                    else if (_settings.ProcessingMode == ProcessingMode.SSD)
-                    {
-                        isHDD = false;
-                    }
-                    else // Auto
+                    if (_settings.ProcessingMode == ProcessingMode.HDD) isHDD = true;
+                    else if (_settings.ProcessingMode == ProcessingMode.SSD) isHDD = false;
+                    else
                     {
                         if (inputs.Length > 0)
                         {
@@ -133,8 +148,6 @@ namespace SharpSFV
                     _fileStore.Clear();
                     _displayIndices.Clear();
 
-                    // Execute Hashing
-                    // Note: updateFileList is 'false' for Job Mode to save memory/cpu
                     await ExecuteHashingEngine(inputs, rootPath, isHDD, false, (curr, total, ok, bad) =>
                     {
                         if (total > 0)
@@ -143,108 +156,143 @@ namespace SharpSFV
                             _jobStore.UpdateProgress(currentJobIdx, pct);
                         }
 
-                        // --- OPTIMIZATION: Drop-Frame UI Throttling ---
-                        long now = Environment.TickCount64;
-                        if (now - Interlocked.Read(ref _lastUiUpdateTick) < 100) return;
-
-                        if (Interlocked.CompareExchange(ref _uiBusy, 1, 0) == 0)
-                        {
-                            Interlocked.Exchange(ref _lastUiUpdateTick, now);
-
-                            this.BeginInvoke(new Action(() =>
-                            {
-                                try
-                                {
-                                    lvFiles.Invalidate();
-                                }
-                                finally
-                                {
-                                    Interlocked.Exchange(ref _uiBusy, 0);
-                                }
-                            }));
-                        }
+                        ThrottledUiUpdate(curr, total, ok, 0, bad);
                     });
 
-                    // Generate Filename
                     string algoExt = GetExtensionForAlgo(_currentHashType);
                     string safeRootName = string.Join("_", jobName.Split(Path.GetInvalidFileNameChars()));
                     string fileName = $"{jobId}.{safeRootName}{algoExt}";
                     string fullSavePath = Path.Combine(rootPath, fileName);
 
-                    // Save
                     bool hasErrors = SaveChecksumFileForJob(fullSavePath);
 
-                    // Stop Timing
                     jobSw.Stop();
                     string jobTimeStr = $"{jobSw.ElapsedMilliseconds} ms";
                     _jobStore.UpdateTime(currentJobIdx, jobTimeStr);
 
-                    // Finalize Job
                     JobStatus finalStatus = hasErrors ? JobStatus.Error : JobStatus.Done;
                     _jobStore.UpdateStatus(currentJobIdx, finalStatus, fullSavePath);
                     _jobStore.UpdateProgress(currentJobIdx, 100.0);
 
-                    // Clean Memory
                     _fileStore.Clear();
                     GC.Collect();
 
-                    this.BeginInvoke(new Action(() => {
-                        lvFiles.Invalidate();
-                        UpdateJobStats();
-                    }));
+                    if (!_isHeadless)
+                    {
+                        this.BeginInvoke(new Action(() => {
+                            lvFiles.Invalidate();
+                            UpdateJobStats();
+                        }));
+                    }
+                    else
+                    {
+                        Console.WriteLine($"Job Finished: {finalStatus} ({jobTimeStr})");
+                    }
                 }
             }
             finally
             {
-                // FIX: Disable UI controls only when the entire queue is finished/stopped
                 SetProcessingState(false);
                 _isJobQueueRunning = false;
+                if (_isHeadless) Application.Exit();
             }
         }
 
-        // --- UI THROTTLING LOGIC ---
+        // --- UI / CONSOLE THROTTLING LOGIC ---
 
         private void ThrottledUiUpdate(int current, int total, int ok, int bad, int missing)
         {
-            // 1. Force update if complete (100%)
-            // If total is known (>0) and current == total, we always let it through.
-            bool isComplete = (total > 0 && current >= total);
-
-            if (!isComplete)
+            // 1. Calculate Throughput & ETA (Every ~500ms)
+            long now = Environment.TickCount64;
+            if (_settings.ShowThroughputStats && (now - _lastSpeedTick > 500))
             {
-                // 2. Pure Time-Based Check (100ms / 10 FPS)
-                // We use Environment.TickCount64 for low-overhead millisecond timing.
-                long now = Environment.TickCount64;
-                long last = Interlocked.Read(ref _lastUiUpdateTick);
+                long currentBytes = Interlocked.Read(ref _processedBytes);
+                long bytesDelta = currentBytes - _lastSpeedBytes;
+                long timeDelta = now - _lastSpeedTick;
 
+                if (timeDelta > 0)
+                {
+                    double speedBps = (double)bytesDelta / timeDelta * 1000.0;
+                    double speedMBps = speedBps / (1024 * 1024);
+
+                    string etaStr = "--:--";
+                    long totalBytes = Interlocked.Read(ref _totalBytesDetected);
+                    if (speedBps > 0 && totalBytes > currentBytes)
+                    {
+                        double secondsRemaining = (totalBytes - currentBytes) / speedBps;
+                        if (secondsRemaining < 86400) // < 1 day
+                        {
+                            etaStr = TimeSpan.FromSeconds(secondsRemaining).ToString(@"hh\:mm\:ss");
+                        }
+                    }
+
+                    _cachedSpeedString = $"Speed: {speedMBps:F1} MB/s | ETA: {etaStr}";
+                }
+
+                _lastSpeedTick = now;
+                _lastSpeedBytes = currentBytes;
+            }
+
+            // 2. Pure Time-Based Throttle (Use _lastUiUpdateTick)
+            if (current < total)
+            {
+                long last = Interlocked.Read(ref _lastUiUpdateTick);
                 if (now - last < 100) return;
             }
 
             // 3. Drop-Frame Mechanism
-            // If the UI thread is still painting the previous frame (_uiBusy == 1),
-            // we skip this update request to prevent message pump saturation.
             if (Interlocked.CompareExchange(ref _uiBusy, 1, 0) == 0)
             {
-                Interlocked.Exchange(ref _lastUiUpdateTick, Environment.TickCount64);
+                Interlocked.Exchange(ref _lastUiUpdateTick, now);
 
+                // Headless Output
+                if (_isHeadless)
+                {
+                    try
+                    {
+                        double percent = (total > 0) ? (double)current / total * 100.0 : 0;
+                        string speedTxt = _settings.ShowThroughputStats ? $" | {_cachedSpeedString}" : "";
+                        Console.Write($"\r{current}/{total} ({percent:F1}%) | OK: {ok} | BAD: {bad} | MISSING: {missing}{speedTxt}   ");
+                    }
+                    finally { Interlocked.Exchange(ref _uiBusy, 0); }
+                    return;
+                }
+
+                // GUI Output
                 this.BeginInvoke(new Action(() =>
                 {
                     try
                     {
-                        // Safely handle the progress bar max
                         int safeTotal = (total <= 0) ? _fileStore.Count : total;
-                        if (safeTotal <= 0) safeTotal = 1; // Prevent div/0 visuals
+                        if (safeTotal <= 0) safeTotal = 1;
 
                         if (progressBarTotal.Maximum != safeTotal)
                             progressBarTotal.Maximum = safeTotal;
 
-                        // Ensure Value doesn't exceed Maximum
                         progressBarTotal.Value = Math.Min(current, safeTotal);
 
-                        UpdateStats(current, safeTotal, ok, bad, missing);
+                        if (_taskbarList != null)
+                        {
+                            try { _taskbarList.SetProgressValue(this.Handle, (ulong)current, (ulong)safeTotal); } catch { }
+                        }
 
-                        // IMPORTANT: Invalidate the ListView to repaint rows (Colors/Status text)
-                        lvFiles.Invalidate();
+                        if (_isCreateMode)
+                        {
+                            // Mini Mode
+                            if (_lblProgress != null) _lblProgress.Text = $"Processing: {current} / {safeTotal}";
+                        }
+                        else if (_isJobMode)
+                        {
+                            // Job Mode
+                            UpdateJobStats(_cachedSpeedString);
+                            lvFiles.Invalidate();
+                        }
+                        else
+                        {
+                            // Standard Mode
+                            UpdateStats(current, safeTotal, ok, bad, missing, _cachedSpeedString);
+                            lvFiles.Invalidate();
+                        }
                     }
                     finally
                     {
@@ -265,6 +313,7 @@ namespace SharpSFV
             int totalFilesDiscovered = 0;
 
             int consumerCount = isHDD ? 1 : Environment.ProcessorCount;
+            int bufferSize = isHDD ? 8 * 1024 * 1024 : 512 * 1024;
 
             var channel = Channel.CreateBounded<FileJob>(new BoundedChannelOptions(50000)
             {
@@ -285,6 +334,7 @@ namespace SharpSFV
                     void FlushUiBatch()
                     {
                         if (uiBatch.Count == 0 || !updateFileList) return;
+                        if (_isHeadless || _isCreateMode) { uiBatch.Clear(); return; }
 
                         var snapshot = uiBatch.ToList();
                         uiBatch.Clear();
@@ -310,11 +360,12 @@ namespace SharpSFV
 
                         if (File.Exists(path))
                         {
+                            try { Interlocked.Add(ref _totalBytesDetected, new FileInfo(path).Length); } catch { }
                             await ProcessFileEntry(path, pooledBase, originalIndex++, channel.Writer, uiBatch);
                         }
                         else if (Directory.Exists(path))
                         {
-                            bool recursive = _settings.ShowAdvancedBar ? _settings.ScanRecursive : true;
+                            bool recursive = (_isCreateMode || _settings.ShowAdvancedBar) ? _settings.ScanRecursive : true;
 
                             var opts = new EnumerationOptions
                             {
@@ -329,13 +380,12 @@ namespace SharpSFV
                                     if (_cts.Token.IsCancellationRequested) break;
                                     try { _pauseEvent.Wait(_cts.Token); } catch { break; }
 
+                                    try { Interlocked.Add(ref _totalBytesDetected, new FileInfo(file).Length); } catch { }
+
                                     await ProcessFileEntry(file, pooledBase, originalIndex++, channel.Writer, uiBatch);
 
-                                    // Periodic Flush Logic
-                                    // 1. Always update the atomic total counter (FIX: This runs even if updateFileList is false)
                                     Interlocked.Exchange(ref totalFilesDiscovered, originalIndex);
 
-                                    // 2. Conditionally update UI list
                                     if (updateFileList && (uiBatch.Count >= 2000 || (DateTime.UtcNow.Ticks - lastBatchTime > 2500000)))
                                     {
                                         FlushUiBatch();
@@ -346,7 +396,6 @@ namespace SharpSFV
                         }
                     }
 
-                    // Final flush
                     Interlocked.Exchange(ref totalFilesDiscovered, originalIndex);
                     if (updateFileList) FlushUiBatch();
                 }
@@ -361,7 +410,7 @@ namespace SharpSFV
             {
                 consumers[i] = Task.Run(async () =>
                 {
-                    byte[] sharedBuffer = ArrayPool<byte>.Shared.Rent(1024 * 1024);
+                    byte[] sharedBuffer = ArrayPool<byte>.Shared.Rent(bufferSize);
                     HashAlgorithm? reusedAlgo = null;
 
                     try
@@ -374,10 +423,7 @@ namespace SharpSFV
                         {
                             while (channel.Reader.TryRead(out FileJob job))
                             {
-                                // --- CHECK PAUSE & CANCEL ---
-                                try { _pauseEvent.Wait(_cts.Token); }
-                                catch (OperationCanceledException) { return; }
-
+                                try { _pauseEvent.Wait(_cts.Token); } catch (OperationCanceledException) { return; }
                                 if (_cts.Token.IsCancellationRequested) return;
 
                                 long startTick = Stopwatch.GetTimestamp();
@@ -398,46 +444,99 @@ namespace SharpSFV
                                         {
                                             using (var fs = new FileStream(handle, FileAccess.Read))
                                             {
-                                                if (!_isJobMode) AddActiveJob(job.Index, Path.GetFileName(job.FullPath));
+                                                if (!_isJobMode && !_isHeadless && !_isCreateMode) AddActiveJob(job.Index, Path.GetFileName(job.FullPath));
 
                                                 var progress = new Progress<double>(p => UpdateActiveJob(job.Index, p));
                                                 using (var ps = new ProgressStream(fs, progress, len))
                                                 {
                                                     hashBytes = HashHelper.ComputeHashSync(ps, _currentHashType, sharedBuffer, reusedAlgo);
                                                 }
+                                                Interlocked.Add(ref _processedBytes, len);
 
-                                                if (!_isJobMode) RemoveActiveJob(job.Index);
+                                                if (!_isJobMode && !_isHeadless && !_isCreateMode) RemoveActiveJob(job.Index);
                                             }
                                         }
                                         else
                                         {
-                                            hashBytes = HashHelper.ComputeHashHandle(handle, _currentHashType, sharedBuffer, reusedAlgo);
+                                            long pos = 0;
+                                            int read;
+
+                                            if (_currentHashType == HashType.XXHASH3)
+                                            {
+                                                var xx3 = new System.IO.Hashing.XxHash128();
+                                                while ((read = RandomAccess.Read(handle, sharedBuffer, pos)) > 0)
+                                                {
+                                                    xx3.Append(new ReadOnlySpan<byte>(sharedBuffer, 0, read));
+                                                    pos += read;
+                                                    Interlocked.Add(ref _processedBytes, read);
+                                                }
+                                                hashBytes = xx3.GetCurrentHash();
+                                            }
+                                            else if (_currentHashType == HashType.Crc32)
+                                            {
+                                                var crc = new System.IO.Hashing.Crc32();
+                                                while ((read = RandomAccess.Read(handle, sharedBuffer, pos)) > 0)
+                                                {
+                                                    crc.Append(new ReadOnlySpan<byte>(sharedBuffer, 0, read));
+                                                    pos += read;
+                                                    Interlocked.Add(ref _processedBytes, read);
+                                                }
+                                                hashBytes = crc.GetCurrentHash();
+                                            }
+                                            else if (reusedAlgo != null)
+                                            {
+                                                while ((read = RandomAccess.Read(handle, sharedBuffer, pos)) > 0)
+                                                {
+                                                    reusedAlgo.TransformBlock(sharedBuffer, 0, read, null, 0);
+                                                    pos += read;
+                                                    Interlocked.Add(ref _processedBytes, read);
+                                                }
+                                                reusedAlgo.TransformFinalBlock(Array.Empty<byte>(), 0, 0);
+                                                hashBytes = reusedAlgo.Hash;
+                                            }
                                         }
                                     }
                                 }
                                 catch { status = ItemStatus.Error; }
 
-                                // Always calculate time, regardless of visibility settings
                                 long endTick = Stopwatch.GetTimestamp();
                                 double elapsedMs = (double)(endTick - startTick) * 1000 / Stopwatch.Frequency;
                                 string timeStr = $"{(long)elapsedMs} ms";
 
-                                if (hashBytes == null || status == ItemStatus.Error)
+                                ItemStatus statusFinal = ItemStatus.Error;
+
+                                if (status == ItemStatus.Error || hashBytes == null)
                                 {
-                                    status = ItemStatus.Error;
+                                    statusFinal = ItemStatus.Error;
                                     Interlocked.Increment(ref errorCount);
+                                }
+                                else if (job.ExpectedHash == null)
+                                {
+                                    // CREATION MODE
+                                    statusFinal = ItemStatus.OK;
+                                    Interlocked.Increment(ref okCount);
                                 }
                                 else
                                 {
-                                    status = ItemStatus.OK;
-                                    Interlocked.Increment(ref okCount);
+                                    // VERIFICATION MODE
+                                    bool isMatch = hashBytes.SequenceEqual(job.ExpectedHash);
+                                    if (isMatch)
+                                    {
+                                        statusFinal = ItemStatus.OK;
+                                        Interlocked.Increment(ref okCount);
+                                    }
+                                    else
+                                    {
+                                        statusFinal = ItemStatus.Bad;
+                                        // Since we are in creation flow (ExecuteHashingEngine), use errorCount variable.
+                                        // Realistically this path is for mixed usage, but 'badCount' variable isn't in this scope.
+                                        Interlocked.Increment(ref errorCount);
+                                    }
                                 }
 
-                                _fileStore.SetResult(job.Index, hashBytes, timeStr, status);
+                                _fileStore.SetResult(job.Index, hashBytes, timeStr, statusFinal);
 
                                 int currentCompleted = Interlocked.Increment(ref completed);
-
-                                // Pass current 'totalFilesDiscovered' (might be updating while producer runs)
                                 progressCallback(currentCompleted, totalFilesDiscovered, okCount, errorCount);
                             }
                         }
@@ -455,6 +554,25 @@ namespace SharpSFV
 
             GCSettings.LatencyMode = oldMode;
             return completed;
+        }
+
+        private string FindCommonBasePath(IEnumerable<string> paths)
+        {
+            var pathList = paths.ToList();
+            if (pathList.Count == 0) return "";
+            if (pathList.Count == 1) return Directory.Exists(pathList[0]) ? pathList[0] : Path.GetDirectoryName(pathList[0]) ?? "";
+
+            string commonPath = pathList[0];
+            foreach (string path in pathList.Skip(1))
+            {
+                while (!path.StartsWith(commonPath, StringComparison.OrdinalIgnoreCase) && commonPath.Length > 0)
+                {
+                    commonPath = Path.GetDirectoryName(commonPath) ?? "";
+                }
+            }
+            if (File.Exists(commonPath)) commonPath = Path.GetDirectoryName(commonPath) ?? "";
+
+            return commonPath;
         }
 
         private bool SaveChecksumFileForJob(string fullPath)
@@ -510,15 +628,22 @@ namespace SharpSFV
             };
         }
 
+        // --- VERIFICATION ENGINE ---
         private async Task RunVerification(string checkFilePath)
         {
             SetProcessingState(true);
             _cts = new CancellationTokenSource();
 
+            _totalBytesDetected = 0;
+            _processedBytes = 0;
+            _lastSpeedBytes = 0;
+            _lastSpeedTick = Environment.TickCount64;
+            _cachedSpeedString = "";
+
             GCLatencyMode oldMode = GCSettings.LatencyMode;
             GCSettings.LatencyMode = GCLatencyMode.SustainedLowLatency;
 
-            SetupUIForMode("Verification");
+            if (!_isHeadless) SetupUIForMode("Verification");
 
             string baseFolder = Path.GetDirectoryName(checkFilePath) ?? "";
             string ext = Path.GetExtension(checkFilePath).ToLowerInvariant();
@@ -533,8 +658,6 @@ namespace SharpSFV
             SetAlgorithm(verificationAlgo);
 
             var parsedLines = new List<(byte[] ExpectedHash, string Filename)>();
-
-            // --- NEW: Comment Parser ---
             StringBuilder sbComments = new StringBuilder();
 
             try
@@ -542,14 +665,11 @@ namespace SharpSFV
                 foreach (var line in await File.ReadAllLinesAsync(checkFilePath))
                 {
                     string trimmed = line.TrimStart();
-
-                    // Detect Comments starting with //
                     if (trimmed.StartsWith("//"))
                     {
                         sbComments.AppendLine(trimmed.Substring(2).Trim());
                         continue;
                     }
-
                     if (string.IsNullOrWhiteSpace(line) || trimmed.StartsWith(";")) continue;
 
                     string expectedHashStr = "", filename = "";
@@ -565,35 +685,48 @@ namespace SharpSFV
                     }
                 }
             }
-            catch (Exception ex) { MessageBox.Show("Error parsing: " + ex.Message); SetProcessingState(false); return; }
+            catch (Exception ex)
+            {
+                if (_isHeadless) Console.WriteLine($"Error parsing: {ex.Message}");
+                else MessageBox.Show("Error parsing: " + ex.Message);
+                SetProcessingState(false);
+                if (_isHeadless) Application.Exit();
+                return;
+            }
 
-            // --- DISPLAY COMMENTS ---
-            string commentText = sbComments.ToString();
-            if (_txtComments != null) _txtComments.Text = commentText;
-            if (_commentsPanel != null) _commentsPanel.Visible = !string.IsNullOrWhiteSpace(commentText);
+            if (!_isHeadless)
+            {
+                string commentText = sbComments.ToString();
+                if (_txtComments != null) _txtComments.Text = commentText;
+                if (_commentsPanel != null) _commentsPanel.Visible = !string.IsNullOrWhiteSpace(commentText);
+            }
 
             _fileStore.Clear();
             _displayIndices.Clear();
 
             int missingCount = 0;
             int loadIndex = 0;
-
             string pooledBase = StringPool.GetOrAdd(baseFolder);
 
             foreach (var entry in parsedLines)
             {
                 string pooledName = StringPool.GetOrAdd(Path.GetFileName(entry.Filename));
                 string pooledRel = StringPool.GetOrAdd(entry.Filename);
-
                 int idx = _fileStore.Add(pooledName, pooledRel, pooledBase, loadIndex++, ItemStatus.Queued, entry.ExpectedHash);
                 _displayIndices.Add(idx);
             }
 
-            _displayIndices.Sort((a, b) => string.Compare(_fileStore.GetFullPath(a), _fileStore.GetFullPath(b), StringComparison.OrdinalIgnoreCase));
-            UpdateDisplayList();
-
-            UpdateStats(0, _fileStore.Count, 0, 0, missingCount);
-            progressBarTotal.Maximum = _fileStore.Count;
+            if (!_isHeadless)
+            {
+                _displayIndices.Sort((a, b) => string.Compare(_fileStore.GetFullPath(a), _fileStore.GetFullPath(b), StringComparison.OrdinalIgnoreCase));
+                UpdateDisplayList();
+                UpdateStats(0, _fileStore.Count, 0, 0, missingCount);
+                progressBarTotal.Maximum = _fileStore.Count;
+            }
+            else
+            {
+                Console.WriteLine($"Verifying {checkFilePath} ({_fileStore.Count} files)...");
+            }
 
             int completed = 0, okCount = 0, badCount = 0;
 
@@ -606,8 +739,8 @@ namespace SharpSFV
                 if (!string.IsNullOrEmpty(root)) isHDD = DriveDetector.IsRotational(root);
             }
 
-            int consumerCount = isHDD ? 1 : Environment.ProcessorCount;
-            this.Text = $"SharpSFV - Verifying... [{(isHDD ? "HDD/Seq" : "SSD/Par")}]";
+            if (!_isHeadless)
+                this.Text = $"SharpSFV - Verifying... [{(isHDD ? "HDD/Seq" : "SSD/Par")}]";
 
             Stopwatch globalSw = Stopwatch.StartNew();
             var channel = Channel.CreateBounded<FileJob>(50000);
@@ -626,6 +759,7 @@ namespace SharpSFV
 
                         if (File.Exists(fullPath))
                         {
+                            try { Interlocked.Add(ref _totalBytesDetected, new FileInfo(fullPath).Length); } catch { }
                             _fileStore.Statuses[idx] = ItemStatus.Pending;
                             await channel.Writer.WriteAsync(new FileJob(idx, fullPath, expected), _cts.Token);
                         }
@@ -641,12 +775,15 @@ namespace SharpSFV
                 finally { channel.Writer.Complete(); }
             });
 
+            int bufferSize = isHDD ? 8 * 1024 * 1024 : 512 * 1024;
+            int consumerCount = isHDD ? 1 : Environment.ProcessorCount;
             var consumers = new Task[consumerCount];
+
             for (int i = 0; i < consumerCount; i++)
             {
                 consumers[i] = Task.Run(async () =>
                 {
-                    byte[] sharedBuffer = ArrayPool<byte>.Shared.Rent(1024 * 1024);
+                    byte[] sharedBuffer = ArrayPool<byte>.Shared.Rent(bufferSize);
                     HashAlgorithm? reusedAlgo = null;
 
                     try
@@ -659,13 +796,12 @@ namespace SharpSFV
                         {
                             while (channel.Reader.TryRead(out FileJob job))
                             {
-                                try { _pauseEvent.Wait(_cts.Token); }
-                                catch (OperationCanceledException) { return; }
-
+                                try { _pauseEvent.Wait(_cts.Token); } catch (OperationCanceledException) { return; }
                                 if (_cts.Token.IsCancellationRequested) return;
 
                                 long startTick = Stopwatch.GetTimestamp();
                                 byte[]? calculatedHash = null;
+                                ItemStatus status = ItemStatus.Pending;
 
                                 try
                                 {
@@ -681,51 +817,79 @@ namespace SharpSFV
                                         {
                                             using (var fs = new FileStream(handle, FileAccess.Read))
                                             {
-                                                AddActiveJob(job.Index, Path.GetFileName(job.FullPath));
+                                                if (!_isHeadless) AddActiveJob(job.Index, Path.GetFileName(job.FullPath));
                                                 var progress = new Progress<double>(p => UpdateActiveJob(job.Index, p));
                                                 var streamToHash = new ProgressStream(fs, progress, len);
                                                 calculatedHash = HashHelper.ComputeHashSync(streamToHash, verificationAlgo, sharedBuffer, reusedAlgo);
-                                                RemoveActiveJob(job.Index);
+                                                Interlocked.Add(ref _processedBytes, len);
+                                                if (!_isHeadless) RemoveActiveJob(job.Index);
                                             }
                                         }
                                         else
                                         {
-                                            calculatedHash = HashHelper.ComputeHashHandle(handle, verificationAlgo, sharedBuffer, reusedAlgo);
+                                            long pos = 0;
+                                            int read;
+
+                                            if (verificationAlgo == HashType.XXHASH3)
+                                            {
+                                                var xx3 = new System.IO.Hashing.XxHash128();
+                                                while ((read = RandomAccess.Read(handle, sharedBuffer, pos)) > 0)
+                                                {
+                                                    xx3.Append(new ReadOnlySpan<byte>(sharedBuffer, 0, read));
+                                                    pos += read;
+                                                    Interlocked.Add(ref _processedBytes, read);
+                                                }
+                                                calculatedHash = xx3.GetCurrentHash();
+                                            }
+                                            else if (verificationAlgo == HashType.Crc32)
+                                            {
+                                                var crc = new System.IO.Hashing.Crc32();
+                                                while ((read = RandomAccess.Read(handle, sharedBuffer, pos)) > 0)
+                                                {
+                                                    crc.Append(new ReadOnlySpan<byte>(sharedBuffer, 0, read));
+                                                    pos += read;
+                                                    Interlocked.Add(ref _processedBytes, read);
+                                                }
+                                                calculatedHash = crc.GetCurrentHash();
+                                            }
+                                            else if (reusedAlgo != null)
+                                            {
+                                                while ((read = RandomAccess.Read(handle, sharedBuffer, pos)) > 0)
+                                                {
+                                                    reusedAlgo.TransformBlock(sharedBuffer, 0, read, null, 0);
+                                                    pos += read;
+                                                    Interlocked.Add(ref _processedBytes, read);
+                                                }
+                                                reusedAlgo.TransformFinalBlock(Array.Empty<byte>(), 0, 0);
+                                                calculatedHash = reusedAlgo.Hash;
+                                            }
                                         }
                                     }
                                 }
-                                catch (OperationCanceledException) { return; }
-                                catch { }
+                                catch { status = ItemStatus.Error; }
 
-                                // Always calculate time, regardless of visibility settings
                                 long endTick = Stopwatch.GetTimestamp();
                                 double elapsedMs = (double)(endTick - startTick) * 1000 / Stopwatch.Frequency;
                                 string timeStr = $"{(long)elapsedMs} ms";
 
-                                bool isMatch = false;
-                                if (calculatedHash != null && job.ExpectedHash != null)
+                                ItemStatus statusFinal;
+                                if (status == ItemStatus.Error || calculatedHash == null)
                                 {
-                                    if (calculatedHash.SequenceEqual(job.ExpectedHash)) isMatch = true;
-                                }
-
-                                ItemStatus status;
-                                if (isMatch)
-                                {
-                                    status = ItemStatus.OK;
-                                    Interlocked.Increment(ref okCount);
-                                }
-                                else if (calculatedHash == null)
-                                {
-                                    status = ItemStatus.Error;
+                                    statusFinal = ItemStatus.Error;
                                     Interlocked.Increment(ref badCount);
+                                }
+                                else if (job.ExpectedHash != null && calculatedHash.SequenceEqual(job.ExpectedHash))
+                                {
+                                    statusFinal = ItemStatus.OK;
+                                    Interlocked.Increment(ref okCount);
                                 }
                                 else
                                 {
-                                    status = ItemStatus.Bad;
+                                    statusFinal = ItemStatus.Bad;
                                     Interlocked.Increment(ref badCount);
                                 }
 
-                                _fileStore.SetResult(job.Index, calculatedHash, timeStr, status);
+                                _fileStore.SetResult(job.Index, calculatedHash, timeStr, statusFinal);
 
                                 int currentCompleted = Interlocked.Increment(ref completed);
                                 ThrottledUiUpdate(currentCompleted, -1, okCount, badCount, missingCount);
