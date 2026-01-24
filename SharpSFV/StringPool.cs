@@ -26,7 +26,7 @@ namespace SharpSFV
 
             lock (_lock)
             {
-                // .NET 10 Feature: Lookup dictionary entries using Span<char>
+                // Lookup dictionary entries using Span<char>
                 var lookup = _pool.GetAlternateLookup<ReadOnlySpan<char>>();
 
                 if (lookup.TryGetValue(span, out string? existing))

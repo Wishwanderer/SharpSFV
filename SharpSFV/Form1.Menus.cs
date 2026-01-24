@@ -72,7 +72,7 @@ namespace SharpSFV
 
             _menuViewTime = new ToolStripMenuItem("Show Time Elapsed Tab", null, (s, e) => ToggleTimeColumn()) { CheckOnClick = true };
 
-            _menuViewThroughput = new ToolStripMenuItem("Show Throughput & ETA", null, (s, e) => {
+            _menuViewThroughput = new ToolStripMenuItem("Show Throughput && ETA", null, (s, e) => {
                 _settings.ShowThroughputStats = !_settings.ShowThroughputStats;
                 if (_isJobMode) UpdateJobStats(); else UpdateStats(0, 0, 0, 0, 0);
             })

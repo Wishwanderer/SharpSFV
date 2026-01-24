@@ -10,14 +10,11 @@ namespace SharpSFV
 {
     public partial class Form1
     {
-        private CheckBox? _chkComments; // Field for Comments Toggle
+        private CheckBox? _chkComments;
 
         private void SetupLayout()
         {
-            // If running in CLI mode OR Create Mode (Mini UI), skip standard layout
             if (_isHeadless || _isCreateMode) return;
-
-            // 1. Ensure all components are initialized
             if (_mainSplitter == null || lvFiles == null) SetupActiveJobsPanel();
             if (_menuStrip == null) SetupCustomMenu();
             if (_statsPanel == null) SetupStatsPanel();
@@ -28,7 +25,6 @@ namespace SharpSFV
             this.Controls.Clear();
             this.MinimumSize = new Size(600, 400);
 
-            // 2. Configure Components
             Panel progressPanel = new Panel { Height = 15, Dock = DockStyle.Bottom, Padding = new Padding(2) };
 
             if (progressBarTotal != null)
@@ -52,7 +48,6 @@ namespace SharpSFV
                 }
             }
 
-            // 3. Add Controls (Z-Order: Fill First, Top Last)
             if (_mainSplitter != null) this.Controls.Add(_mainSplitter);
             else if (lvFiles != null) this.Controls.Add(lvFiles);
 
@@ -79,7 +74,7 @@ namespace SharpSFV
 
             // Geometry Configuration
             int marginX = 12;
-            int marginY = 5; // 5px top + 5px bottom = 10px total margin
+            int marginY = 25; // 25px top + 25px bottom = 50px total margin
             int btnWidth = 75;
             int btnHeight = 26;
             int spacing = 10;
@@ -238,6 +233,16 @@ namespace SharpSFV
                 Visible = _settings.ShowTimeTab
             };
 
+            _lblLegacyWarning = new Label
+            {
+                Text = "Legacy SFV (Endian Mismatch) Detected",
+                AutoSize = true,
+                Location = new Point(300, 28),
+                ForeColor = Color.DarkOrange,
+                Font = _fontBold,
+                Visible = false
+            };
+
             _statsFlowPanel = new FlowLayoutPanel
             {
                 Location = new Point(10, 28),
@@ -288,6 +293,7 @@ namespace SharpSFV
 
             _statsPanel.Controls.Add(_lblProgress);
             _statsPanel.Controls.Add(_lblTotalTime);
+            _statsPanel.Controls.Add(_lblLegacyWarning);
             _statsPanel.Controls.Add(_statsFlowPanel);
 
             _statsPanel.Controls.Add(_btnPause);
@@ -324,9 +330,7 @@ namespace SharpSFV
 
         private void SetupUIForMode(string mode)
         {
-            // If we are in Job Mode, do NOT let standard view options reset the columns
             if (_isJobMode) return;
-
             if (lvFiles == null) return;
 
             lvFiles.ColumnWidthChanging -= LvFiles_ColumnWidthChanging;
@@ -334,9 +338,7 @@ namespace SharpSFV
             _originalColWidths.Clear();
             _listSorter.SortColumn = -1;
             _listSorter.Order = SortOrder.None;
-
             _isVerificationMode = (mode == "Verification");
-
             lvFiles.AllowColumnReorder = !_settings.LockColumns;
 
             void AddColLocal(string text, int width, string tag)
@@ -362,7 +364,9 @@ namespace SharpSFV
             if (_lblTotalTime != null)
                 _lblTotalTime.Visible = _settings.ShowTimeTab;
 
-            // TITLE BAR LOGIC:
+            if (_lblLegacyWarning != null)
+                _lblLegacyWarning.Visible = _legacySfvDetected;
+
             if (!_isJobMode)
             {
                 this.Text = (_isVerificationMode) ? "SharpSFV - Verify" : "SharpSFV";
@@ -386,8 +390,6 @@ namespace SharpSFV
         {
             if (_isJobMode == jobMode) return;
             _isJobMode = jobMode;
-
-            // Update Radio Button Menu State
             if (_menuModeStandard != null) _menuModeStandard.Checked = !_isJobMode;
             if (_menuModeJob != null) _menuModeJob.Checked = _isJobMode;
 
@@ -410,8 +412,8 @@ namespace SharpSFV
                 if (_advancedPanel != null) _advancedPanel.Visible = false;
                 if (_commentsPanel != null) _commentsPanel.Visible = false;
 
-                // Ensure global time label is hidden in Job Mode
                 if (_lblTotalTime != null) _lblTotalTime.Visible = false;
+                if (_lblLegacyWarning != null) _lblLegacyWarning.Visible = false;
 
                 lvFiles.VirtualListSize = _jobStore.Count;
                 this.Text = $"SharpSFV - Job Queue [{_currentHashType}]";
@@ -428,7 +430,7 @@ namespace SharpSFV
                     _commentsPanel.Visible = !string.IsNullOrWhiteSpace(_txtComments.Text);
 
                 lvFiles.VirtualListSize = _displayIndices.Count;
-                SetAlgorithm(_currentHashType); // Restore standard selection visual
+                SetAlgorithm(_currentHashType);
 
                 UpdateStats(0, 0, 0, 0, 0);
             }
@@ -439,15 +441,11 @@ namespace SharpSFV
 
         private void UpdateMenuAvailability()
         {
-            // In Job Mode, certain visual/advanced options are irrelevant and confusing.
             bool enableStandardFeatures = !_isJobMode;
 
-            // View Menu
             if (_menuViewHash != null) _menuViewHash.Enabled = enableStandardFeatures;
             if (_menuViewExpected != null) _menuViewExpected.Enabled = enableStandardFeatures;
             if (_menuViewTime != null) _menuViewTime.Enabled = enableStandardFeatures;
-
-            // Options Menu (Toolbars)
             if (_menuOptionsFilter != null) _menuOptionsFilter.Enabled = enableStandardFeatures;
             if (_menuOptionsAdvanced != null) _menuOptionsAdvanced.Enabled = enableStandardFeatures;
         }
@@ -723,7 +721,6 @@ namespace SharpSFV
         private void ToggleTimeColumn()
         {
             _settings.ShowTimeTab = _menuViewTime?.Checked ?? false;
-            // Prevent UI Setup in Job Mode
             if (!_isJobMode) SetupUIForMode(_isVerificationMode ? "Verification" : "Creation");
         }
     }

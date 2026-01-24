@@ -54,6 +54,7 @@ namespace SharpSFV
         private bool _isVerificationMode = false;
         private HashType _currentHashType = HashType.XXHASH3;
         private CancellationTokenSource? _cts;
+        private volatile bool _legacySfvDetected = false; // Track endian issues
 
         // Headless Mode Flag
         private bool _isHeadless = false;
@@ -99,6 +100,7 @@ namespace SharpSFV
         // Stats Controls
         private Label? _lblProgress;
         private Label? _lblTotalTime;
+        private Label? _lblLegacyWarning;
         private FlowLayoutPanel? _statsFlowPanel;
         private Label? _lblStatsOK;
         private Label? _lblStatsBad;
@@ -476,10 +478,15 @@ namespace SharpSFV
                     }
                 }
 
-                if (_settings.ShowTimeTab && !isCancelled && _lblTotalTime != null)
+                if (_settings.ShowTimeTab && !isCancelled && _lblTotalTime != null && !_isJobMode)
                 {
                     _lblTotalTime.Text = $"Total Elapsed Time: {sw.ElapsedMilliseconds} ms";
                     _lblTotalTime.Visible = true;
+                }
+
+                if (_legacySfvDetected && _lblLegacyWarning != null && !_isJobMode)
+                {
+                    _lblLegacyWarning.Visible = true;
                 }
 
                 lvFiles.Invalidate();

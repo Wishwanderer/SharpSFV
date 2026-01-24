@@ -311,7 +311,6 @@ namespace SharpSFV
 
             int completed = 0, okCount = 0, errorCount = 0;
             int totalFilesDiscovered = 0;
-
             int consumerCount = isHDD ? 1 : Environment.ProcessorCount;
             int bufferSize = isHDD ? 8 * 1024 * 1024 : 512 * 1024;
 
@@ -512,13 +511,11 @@ namespace SharpSFV
                                 }
                                 else if (job.ExpectedHash == null)
                                 {
-                                    // CREATION MODE
                                     statusFinal = ItemStatus.OK;
                                     Interlocked.Increment(ref okCount);
                                 }
                                 else
                                 {
-                                    // VERIFICATION MODE
                                     bool isMatch = hashBytes.SequenceEqual(job.ExpectedHash);
                                     if (isMatch)
                                     {
@@ -528,8 +525,6 @@ namespace SharpSFV
                                     else
                                     {
                                         statusFinal = ItemStatus.Bad;
-                                        // Since we are in creation flow (ExecuteHashingEngine), use errorCount variable.
-                                        // Realistically this path is for mixed usage, but 'badCount' variable isn't in this scope.
                                         Interlocked.Increment(ref errorCount);
                                     }
                                 }
@@ -554,25 +549,6 @@ namespace SharpSFV
 
             GCSettings.LatencyMode = oldMode;
             return completed;
-        }
-
-        private string FindCommonBasePath(IEnumerable<string> paths)
-        {
-            var pathList = paths.ToList();
-            if (pathList.Count == 0) return "";
-            if (pathList.Count == 1) return Directory.Exists(pathList[0]) ? pathList[0] : Path.GetDirectoryName(pathList[0]) ?? "";
-
-            string commonPath = pathList[0];
-            foreach (string path in pathList.Skip(1))
-            {
-                while (!path.StartsWith(commonPath, StringComparison.OrdinalIgnoreCase) && commonPath.Length > 0)
-                {
-                    commonPath = Path.GetDirectoryName(commonPath) ?? "";
-                }
-            }
-            if (File.Exists(commonPath)) commonPath = Path.GetDirectoryName(commonPath) ?? "";
-
-            return commonPath;
         }
 
         private bool SaveChecksumFileForJob(string fullPath)
@@ -628,6 +604,25 @@ namespace SharpSFV
             };
         }
 
+        private string FindCommonBasePath(IEnumerable<string> paths)
+        {
+            var pathList = paths.ToList();
+            if (pathList.Count == 0) return "";
+            if (pathList.Count == 1) return Directory.Exists(pathList[0]) ? pathList[0] : Path.GetDirectoryName(pathList[0]) ?? "";
+
+            string commonPath = pathList[0];
+            foreach (string path in pathList.Skip(1))
+            {
+                while (!path.StartsWith(commonPath, StringComparison.OrdinalIgnoreCase) && commonPath.Length > 0)
+                {
+                    commonPath = Path.GetDirectoryName(commonPath) ?? "";
+                }
+            }
+            if (File.Exists(commonPath)) commonPath = Path.GetDirectoryName(commonPath) ?? "";
+
+            return commonPath;
+        }
+
         // --- VERIFICATION ENGINE ---
         private async Task RunVerification(string checkFilePath)
         {
@@ -639,6 +634,7 @@ namespace SharpSFV
             _lastSpeedBytes = 0;
             _lastSpeedTick = Environment.TickCount64;
             _cachedSpeedString = "";
+            _legacySfvDetected = false; // Reset legacy flag
 
             GCLatencyMode oldMode = GCSettings.LatencyMode;
             GCSettings.LatencyMode = GCLatencyMode.SustainedLowLatency;
@@ -775,9 +771,13 @@ namespace SharpSFV
                 finally { channel.Writer.Complete(); }
             });
 
+            // Smart Buffering for Verification
             int bufferSize = isHDD ? 8 * 1024 * 1024 : 512 * 1024;
             int consumerCount = isHDD ? 1 : Environment.ProcessorCount;
             var consumers = new Task[consumerCount];
+
+            // Reusable buffer allocation OUTSIDE the loop to prevent Stack Overflow (CA2014)
+            byte[] endianBuffer = new byte[64]; // Max hash size
 
             for (int i = 0; i < consumerCount; i++)
             {
@@ -827,6 +827,7 @@ namespace SharpSFV
                                         }
                                         else
                                         {
+                                            // Handle-Based Hashing & Metrics
                                             long pos = 0;
                                             int read;
 
@@ -872,6 +873,7 @@ namespace SharpSFV
                                 double elapsedMs = (double)(endTick - startTick) * 1000 / Stopwatch.Frequency;
                                 string timeStr = $"{(long)elapsedMs} ms";
 
+                                // --- FIXED VERIFICATION STATUS LOGIC (Endian Fallback) ---
                                 ItemStatus statusFinal;
                                 if (status == ItemStatus.Error || calculatedHash == null)
                                 {
@@ -885,8 +887,37 @@ namespace SharpSFV
                                 }
                                 else
                                 {
-                                    statusFinal = ItemStatus.Bad;
-                                    Interlocked.Increment(ref badCount);
+                                    // Mismatch found. Check for Endian Flip (Only for CRC32)
+                                    bool recovered = false;
+
+                                    if (verificationAlgo == HashType.Crc32 && job.ExpectedHash != null)
+                                    {
+                                        int len = calculatedHash.Length;
+                                        if (len <= endianBuffer.Length)
+                                        {
+                                            Span<byte> reversed = new Span<byte>(endianBuffer, 0, len);
+                                            calculatedHash.CopyTo(reversed);
+                                            reversed.Reverse();
+
+                                            if (reversed.SequenceEqual(job.ExpectedHash))
+                                            {
+                                                recovered = true;
+                                                // Trigger Legacy Warning UI on next update
+                                                _legacySfvDetected = true;
+                                            }
+                                        }
+                                    }
+
+                                    if (recovered)
+                                    {
+                                        statusFinal = ItemStatus.OK;
+                                        Interlocked.Increment(ref okCount);
+                                    }
+                                    else
+                                    {
+                                        statusFinal = ItemStatus.Bad;
+                                        Interlocked.Increment(ref badCount);
+                                    }
                                 }
 
                                 _fileStore.SetResult(job.Index, calculatedHash, timeStr, statusFinal);
