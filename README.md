@@ -1,92 +1,119 @@
 # SharpSFV
 
-**SharpSFV** is a modern, high-performance file hashing and verification tool built in C# (.NET 10). Designed as a spiritual successor to the classic QuickSFV, it retains a familiar, lightweight interface while introducing modern algorithms, smart hardware detection, and the robust file handling required for massive datasets.
+**SharpSFV** is a modern, high-performance file hashing and verification tool built in **C# (.NET 10)**. Designed as a spiritual successor to the classic QuickSFV, it retains a familiar, lightweight interface while leveraging **Data-Oriented Design (DoD)**, smart hardware detection, and Zero-Allocation memory management to handle massive datasets.
 
-## QuickSFV Comparison Benchmarks (MD5)
+---
 
-Benchmark contains 500K files ranging from 1KB to 10MB
+## QuickSFV Comparison Benchmark (MD5)
 
-* **QuickSFV** 
-   * **Time to check checksums**: DNF - Crashed at just under 250.000 files, in this time QuickSFV took ~10mins 20secs to process said files.
+*Benchmark performed on a dataset of **500,000 files** (ranging from 1KB to 10MB).*
 
-* **SharpSFV v2.40** 
-   * **Time to check checksums**: 74382ms (75 seconds)
+| Tool | Result | Notes |
+| :--- | :--- | :--- |
+| **QuickSFV** | **DNF (Crashed)** | Crashed at ~250,000 files. Process took ~10m 20s before failure. |
+| **SharpSFV** | **74,382ms (75s)** | Completed successfully with full UI responsiveness. |
 
+---
 
-## Improvements over QuickSFV
+## Technical Improvements
 
-SharpSFV addresses the limitations of legacy tools to meet modern computing standards:
+SharpSFV addresses the architectural limitations of legacy tools to meet modern computing standards:
 
-*   **Smart Threading:** Automatically detects if files are on a mechanical **HDD** or an **SSD/NVMe**. It switches between sequential processing (to avoid disk thrashing) and massive parallelism (to maximize CPU usage) automatically.
-*   **Virtual Mode Scalability:** Capable of handling lists with **500.000+ files** with zero UI lag or memory overhead.
-*   **Active Large File Pinning:** Files larger than 1GB are temporarily "pinned" to the top of the list during processing so they don't get lost in the scrollbar, returning to their sorted position upon completion.
-*   **Legacy Compatibility:** Robust parsing engine that supports both modern `Hash *Filename` and legacy `Filename Hash` syntax. It also automatically detects and handles **Endianness differences** in older CRC-32 checksums.
-*   **Modern Algorithms:** Implements **xxHash-3 (128-bit)**, which is orders of magnitude faster than standard algorithims, i.e. MD5, SHA1, CRC-32.
-*   **Robust Path Handling:** Full support for Long Paths (260+ characters) and Unicode characters, preventing errors present in QuickSFV.
+*   **Structure of Arrays (SoA):** Unlike standard object-oriented apps, SharpSFV uses parallel arrays to manage data. This reduces memory overhead by ~60% and maximizes CPU cache locality.
+*   **Smart I/O Threading:** Automatically probes the hardware to detect **HDD** vs **SSD/NVMe**.
+    *   *HDD:* Switches to **Sequential** processing to prevent disk thrashing.
+    *   *SSD:* Switches to **Massive Parallelism** to saturate the PCIe bus.
+*   **Zero-Allocation Pipeline:** Utilizes `ArrayPool`, `Span<T>`, and `System.Threading.Channels` to eliminate Garbage Collection (GC) pauses during processing.
+*   **Active Jobs View:** Files larger than **50MB** trigger a secondary "Active Jobs" panel, allowing you to monitor individual progress without the UI freezing on a single file.
+*   **Legacy Compatibility:** Robust parsing engine that handles both `Hash *Filename` and `Filename Hash` syntax. Automatically detects and fixes **Endianness mismatches** in legacy CRC-32 checksums.
+*   **Modern Algorithms:** Implements **xxHash-3 (128-bit)**, providing checksum generation at the speed of RAM (GB/s).
+
+---
 
 ## Key Features
 
-*   **Drag-and-Drop Workflow:** Seamlessly handles files, folders (recursive scanning), and existing checksum files via drag-and-drop.
-*   **Search & Filter:** Instant filtering by filename or status (e.g., quickly isolate "BAD" or "MISSING" files).
-*   **Context Menu Actions:** Right-click files to Open Containing Folder, Copy Path/Hash, Rename, or Delete files directly from the UI.
-*   **Batch Cleanup:** Automatically generate a `.bat` script to delete all files marked as "BAD" during verification.
-*   **Portable Configuration:** All settings are saved to a local `SharpSFV.ini` file, ensuring no registry bloat, with clear, human-readable values, unlike QuickSFV.
-*   **Clipboard Integration:** Copy details to clipboard or Paste (`Ctrl+V`) a list of paths directly into the queue.
+*   **Multiple Operation Modes:**
+    *   **Standard Mode:** Classic list view for verifying or creating checksums.
+    *   **Job Queue Mode:** Dragging folders queues them as distinct jobs, processed sequentially.
+    *   **Mini Mode:** A compact UI for quick Context Menu operations.
+    *   **Headless Mode:** CLI execution for scripting and automation.
+*   **Context Menu Integration:** Right-click files/folders in Explorer to "Create Checksum". Handles multi-instance piping automatically.
+*   **Bad File Tools:**
+    *   Move "BAD" files to a `_BAD_FILES` subfolder.
+    *   Rename corrupt files (append `.CORRUPT`).
+    *   Generate `.bat` scripts to delete bad files or handle duplicates.
+*   **Instant Filtering:** Real-time search by filename or status (e.g., filter to show only "MISSING" files).
+*   **Portable Configuration:** Settings are saved to `SharpSFV.ini`. No Registry bloat.
+
+---
 
 ## Supported Algorithms
 
-*   **xxHash-3 (128-bit):** Default. Extremely high performance; ideal for verifying large datasets or game files.
-*   **CRC-32:** Full support for standard `.sfv` files, including legacy Endian swapping.
-*   **MD5:** Standard industry hash for file integrity.
-*   **SHA-1:** Older standard, widely used for legacy verification.
-*   **SHA-256:** Secure cryptographic hash for high-integrity requirements.
+| Algorithm | Bit Width | Description |
+| :--- | :--- | :--- |
+| **xxHash-3** | 128-bit | **Default.** Extremely fast. Ideal for game files and large datasets. |
+| **CRC-32** | 32-bit | Standard `.sfv` support. Includes legacy Endian-swap logic. |
+| **MD5** | 128-bit | Industry standard for file integrity verification. |
+| **SHA-1** | 160-bit | Legacy standard support. |
+| **SHA-256** | 256-bit | High-security cryptographic hash. |
+
+---
 
 ## Usage
 
-### Creating Checksums
-1.  Drag and drop files or folders into the SharpSFV window.
-2.  (Optional) Paste file paths using `Ctrl+V`.
-3.  Select your desired algorithm from the **Options** menu (defaults to xxHash-3).
-4.  Wait for processing to complete.
-5.  Click **File > Save As...** to generate the checksum file.
+### GUI Modes
+1.  **Creation:** Drag files/folders into the window. Select Algo > `File` > `Save As...`.
+2.  **Verification:** Drag a checksum file (`.sfv`, `.md5`, etc.) into the window.
+    *   *Green:* OK
+    *   *Red:* BAD (Hash Mismatch)
+    *   *Strikethrough:* MISSING (File not found)
+3.  **Job Queue:** Select "Mode > Job Queue Mode", then drag multiple folders to queue them as batch jobs.
 
-### Verifying Files
-1.  Drag and drop a checksum file (`.sfv`, `.md5`, `.xxh3`, etc.) into the window.
-2.  SharpSFV will automatically detect the format and verify entries relative to the checksum file's location.
-3.  Files will be marked as **OK** (Green), **BAD** (Red), or **MISSING** (Strikethrough).
+### Command Line (Headless)
+SharpSFV can be used in scripts without showing a window using the `-headless` flag. It attaches to the parent console to stream output.
 
-### Command Line
-You can open SharpSFV and immediately verify a file by passing it as an argument:
 ```cmd
-SharpSFV.exe <checksum_file.sfv>
-```
-## Usage
-```
-SharpSFV <checksum.sfv/md5/sha1/sha256/xxh3>
+:: Verify a file silently
+SharpSFV.exe -headless "C:\LinuxDistros\ubuntu.md5"
+
+:: Create checksums for a folder (Default Algo)
+SharpSFV.exe -headless -create "C:\Backups\2023"
 ```
 
-## Configuration
+### Context Menu Registration
+To enable right-click integration:
+1.  Run SharpSFV as Administrator (optional, but recommended for registry writes).
+2.  Go to **Options > System Integration > Register Explorer Context Menu**.
 
-Settings are stored in `SharpSFV.ini`. You can modify them via the **Options** menu:
+---
 
-*   **Enable Time Elapsed Tab:** Displays the time taken to process each individual file.
-*   **Always Save Absolute Paths:** Forces the output file to use full drive paths instead of relative paths.
-*   **Show Search/Filter Bar:** Toggles the visibility of the filtering toolbar.
+## Configuration (`SharpSFV.ini`)
 
-## Building
-```
+Settings can be toggled via the **Options** menu or edited manually in the `.ini` file:
+
+*   `ProcessingMode`: Forces `HDD` (Sequential) or `SSD` (Parallel). Default is `Auto`.
+*   `PathStorageMode`: `Relative` (default) or `Absolute`.
+*   `EnableChecksumComments`: Adds header comments (Date/Algo) to generated files.
+*   `ShowThroughputStats`: Toggles the Speed (MB/s) and ETA display.
+*   `OptimizeForHDD`: *Legacy flag, superseded by ProcessingMode.*
+
+---
+
+## Build Instructions
+
+**Requirements:**
+*   .NET 10.0 SDK
+*   Visual Studio 2022 / JetBrains Rider
+
+**Build Command:**
+```powershell
 dotnet publish -c Release -r win-x64 --self-contained false -p:PublishSingleFile=true
 ```
-## Build Requirements
 
-*   **IDE:** Visual Studio 2022 (or newer) or JetBrains Rider.
-*   **Framework:** .NET 8.0 (or newer).
-*   **Dependencies:** `System.IO.Hashing` (NuGet package).
+---
 
 ## License
 
 This project is licensed under the **GNU General Public License v3.0 (GPL-3.0)**.
 
 You may copy, distribute, and modify the software as long as you track changes/dates in source files. Any modifications to or software including (via compiler) GPL-licensed code must also be made available under the GPL along with build & install instructions.
-
-See the [LICENSE](LICENSE.txt) file for more details.
