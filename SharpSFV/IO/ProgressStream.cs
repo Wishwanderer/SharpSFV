@@ -5,6 +5,19 @@ using System.Threading.Tasks;
 
 namespace SharpSFV
 {
+    /// <summary>
+    /// A wrapper around <see cref="Stream"/> that reports read progress to the UI.
+    /// <para>
+    /// <b>Purpose:</b> Used specifically for "Large Files" (>50MB). 
+    /// Small files are processed so quickly that reporting individual progress is wasteful. 
+    /// For large files (e.g., 50GB ISOs), the user needs visual feedback.
+    /// </para>
+    /// <para>
+    /// <b>Optimization:</b> Implements strict event throttling. 
+    /// Without throttling, a fast SSD could trigger the <see cref="IProgress{T}"/> callback 
+    /// 100,000+ times per second, causing the UI thread to hang processing the messages.
+    /// </para>
+    /// </summary>
     public class ProgressStream : Stream
     {
         private readonly Stream _innerStream;
@@ -12,11 +25,11 @@ namespace SharpSFV
         private readonly long _totalLength;
         private long _bytesRead;
 
-        // Optimization: Resolve Throttling
-        private readonly long _bytesPerStep; // 0.1% resolution
+        // --- Throttling State ---
+        private readonly long _bytesPerStep; // Minimum bytes to read before considering an update (0.1% resolution)
         private long _bytesSinceLastReport;
         private long _lastReportTick;
-        private const int ReportIntervalMs = 100; // Cap updates to 10fps
+        private const int ReportIntervalMs = 100; // Cap updates to ~10 frames per second
 
         public ProgressStream(Stream innerStream, IProgress<double> progress, long length)
         {
@@ -24,9 +37,10 @@ namespace SharpSFV
             _progress = progress;
             _totalLength = length;
 
-            // Target 0.1% resolution (1000 steps)
+            // Target 0.1% resolution (1000 steps) to avoid jagged progress bars.
+            // Clamp to a minimum of 64KB to avoid excessive checks on tiny files.
             _bytesPerStep = _totalLength / 1000;
-            if (_bytesPerStep == 0) _bytesPerStep = 64 * 1024; // Min reporting chunk 64KB
+            if (_bytesPerStep == 0) _bytesPerStep = 64 * 1024;
 
             _lastReportTick = Environment.TickCount64;
         }
@@ -52,16 +66,19 @@ namespace SharpSFV
             return read;
         }
 
+        /// <summary>
+        /// Checks if thresholds are met and reports progress.
+        /// </summary>
         private void UpdateProgress(int read)
         {
             if (read == 0) return;
             _bytesRead += read;
             _bytesSinceLastReport += read;
 
-            // 1. Check if we have processed enough data for a 0.1% increment
+            // 1. Byte Threshold: Have we processed enough data to matter? (0.1% change)
             if (_bytesSinceLastReport >= _bytesPerStep)
             {
-                // 2. Check if enough time has passed (Throttling)
+                // 2. Time Threshold: Has enough time passed? (Limit to 10fps)
                 long now = Environment.TickCount64;
                 if ((now - _lastReportTick) >= ReportIntervalMs)
                 {
@@ -74,7 +91,7 @@ namespace SharpSFV
             }
         }
 
-        // Pass-through implementation
+        // --- Pass-through implementation of abstract Stream members ---
         public override bool CanRead => _innerStream.CanRead;
         public override bool CanSeek => _innerStream.CanSeek;
         public override bool CanWrite => _innerStream.CanWrite;

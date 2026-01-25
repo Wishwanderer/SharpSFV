@@ -17,6 +17,13 @@ namespace SharpSFV
     {
         // --- SHELL INTEGRATION ACTIONS ---
 
+        /// <summary>
+        /// Registers SharpSFV in the Windows Explorer Context Menu via the Registry.
+        /// <para>
+        /// <b>Strategy:</b> Writes to <c>HKEY_CURRENT_USER</c> (HKCU) instead of HKLM. 
+        /// This avoids the need for UAC (Admin) elevation while still allowing the menu to appear for the current user.
+        /// </para>
+        /// </summary>
         private void PerformRegisterShell()
         {
             try
@@ -25,6 +32,7 @@ namespace SharpSFV
                 string verifyCommand = $"\"{exePath}\" \"%1\"";
                 string createCommand = $"\"{exePath}\" -create \"%1\"";
 
+                // Register for Folders (Directory)
                 using (var key = Registry.CurrentUser.CreateSubKey(@"Software\Classes\Directory\shell\SharpSFV"))
                 {
                     key.SetValue("", "SharpSFV: Create Checksum");
@@ -32,6 +40,7 @@ namespace SharpSFV
                     using (var cmd = key.CreateSubKey("command")) cmd.SetValue("", createCommand);
                 }
 
+                // Register for All Files (*)
                 using (var key = Registry.CurrentUser.CreateSubKey(@"Software\Classes\*\shell\SharpSFV"))
                 {
                     key.SetValue("", "SharpSFV: Create Checksum");
@@ -39,6 +48,7 @@ namespace SharpSFV
                     using (var cmd = key.CreateSubKey("command")) cmd.SetValue("", createCommand);
                 }
 
+                // Register File Association (.sfv)
                 using (var key = Registry.CurrentUser.CreateSubKey(@"Software\Classes\.sfv")) key.SetValue("", "SharpSFV.File");
 
                 using (var key = Registry.CurrentUser.CreateSubKey(@"Software\Classes\SharpSFV.File"))
@@ -73,6 +83,10 @@ namespace SharpSFV
 
         // --- SMART BAD FILE ACTIONS ---
 
+        /// <summary>
+        /// Scans the FileStore for items marked <see cref="ItemStatus.Bad"/> or <see cref="ItemStatus.Error"/> 
+        /// and moves them to a "_BAD_FILES" subdirectory relative to their original location.
+        /// </summary>
         private void PerformMoveBadFiles()
         {
             if (_fileStore.Count == 0) return;
@@ -104,6 +118,7 @@ namespace SharpSFV
                             string fileName = Path.GetFileName(fullPath);
                             string destPath = Path.Combine(badDir, fileName);
 
+                            // Handle filename collisions by appending timestamp
                             if (File.Exists(destPath))
                             {
                                 string timestamp = DateTime.Now.ToString("yyyyMMddHHmmss");
@@ -112,6 +127,7 @@ namespace SharpSFV
 
                             File.Move(fullPath, destPath);
 
+                            // Update Store to reflect new location (optional, but good for UI consistency)
                             string? oldRel = _fileStore.RelativePaths[i];
                             if (oldRel != null)
                             {
@@ -191,6 +207,7 @@ namespace SharpSFV
 
             if (_isPaused)
             {
+                // Resume
                 _isPaused = false;
                 if (_btnPause != null)
                 {
@@ -212,10 +229,11 @@ namespace SharpSFV
                 }
 
                 SetProgressBarColor(Win32Storage.PBST_NORMAL);
-                _pauseEvent.Set();
+                _pauseEvent.Set(); // Signal threads to continue
             }
             else
             {
+                // Pause
                 _isPaused = true;
                 if (_btnPause != null)
                 {
@@ -237,19 +255,26 @@ namespace SharpSFV
                 }
 
                 SetProgressBarColor(Win32Storage.PBST_PAUSED);
-                _pauseEvent.Reset();
+                _pauseEvent.Reset(); // Block threads
             }
         }
 
         private void PerformCancelAction()
         {
             if (!_isProcessing) return;
+            // If paused, we must unpause to allow threads to exit gracefully upon cancellation
             if (_isPaused) _pauseEvent.Set();
             _cts?.Cancel();
+
+            // Restarting the app is a clean way to ensure all P/Invoke handles and thread states are reset
             Application.Restart();
             Environment.Exit(0);
         }
 
+        /// <summary>
+        /// Reads the clipboard for a Hex string and compares it against the selected file's calculated hash.
+        /// Useful for quick verification against website checksums.
+        /// </summary>
         private void PerformCompareClipboard()
         {
             try
@@ -257,6 +282,7 @@ namespace SharpSFV
                 string text = Clipboard.GetText().Trim();
                 if (string.IsNullOrEmpty(text)) return;
 
+                // Validate Hex format
                 if (!System.Text.RegularExpressions.Regex.IsMatch(text, "^[0-9a-fA-F]+$"))
                 {
                     MessageBox.Show("Clipboard does not contain a valid Hex hash.", "Invalid Hash", MessageBoxButtons.OK, MessageBoxIcon.Warning);
@@ -273,7 +299,7 @@ namespace SharpSFV
                     return;
                 }
 
-                if (text.Length % 2 != 0) text = "0" + text;
+                if (text.Length % 2 != 0) text = "0" + text; // Pad if odd length
 
                 byte[] expectedBytes;
                 try { expectedBytes = Convert.FromHexString(text); }
@@ -336,8 +362,6 @@ namespace SharpSFV
                     int storeIdx = _displayIndices[index];
                     string hash = _fileStore.GetCalculatedHashString(storeIdx);
 
-                    // Logic: If Hash is "Pending" or empty, use status or keep empty, but for copying entry usually implies creating an SFV line.
-                    // If it's effectively empty/pending, we still write the line structure.
                     if (string.IsNullOrEmpty(hash) || hash == "Pending") hash = "";
 
                     string path;
@@ -385,6 +409,16 @@ namespace SharpSFV
             }
         }
 
+        /// <summary>
+        /// Saves the current list to a file (SFV, MD5, etc.).
+        /// <para>
+        /// <b>Logic:</b>
+        /// 1. Determines extension based on current Algo.
+        /// 2. Iterates the FileStore.
+        /// 3. Converts Absolute paths to Relative paths if <see cref="PathStorageMode"/> is Relative.
+        /// 4. Prepends optional PathPrefix (Advanced Options).
+        /// </para>
+        /// </summary>
         private void PerformSaveAction()
         {
             if (_fileStore.Count == 0 && !_isJobMode) { MessageBox.Show("No files to save."); return; }
@@ -443,6 +477,7 @@ namespace SharpSFV
                                             string relPath = Path.GetRelativePath(saveDirectory, fullPath);
                                             if (Path.IsPathRooted(relPath) && !relPath.StartsWith("."))
                                             {
+                                                // Fallback if path is on a different drive
                                                 pathToWrite = _fileStore.RelativePaths[i] ?? Path.GetFileName(fullPath);
                                             }
                                             else
@@ -470,6 +505,9 @@ namespace SharpSFV
 
         // --- SCRIPT GENERATION & EXTRAS ---
 
+        /// <summary>
+        /// Generates a Windows Batch (.bat) file to delete all files marked as BAD/ERROR.
+        /// </summary>
         private void PerformBatchExport()
         {
             var badIndices = new List<int>();
@@ -622,6 +660,7 @@ namespace SharpSFV
 
                     File.Move(currentPath, newPath);
 
+                    // Update SoA Data
                     _fileStore.FileNames[storeIndex] = newName;
 
                     string oldRel = _fileStore.RelativePaths[storeIndex] ?? currentName;
@@ -646,7 +685,7 @@ namespace SharpSFV
                 // Gather UI indices first
                 var uiIndices = new List<int>();
                 foreach (int idx in lvFiles.SelectedIndices) uiIndices.Add(idx);
-                // Sort descending to remove without invalidating subsequent indices
+                // Sort descending to remove without invalidating subsequent indices within the loop
                 uiIndices.Sort((a, b) => b.CompareTo(a));
 
                 lvFiles.BeginUpdate();
@@ -666,7 +705,7 @@ namespace SharpSFV
                             _fileStore.RemoveAt(storeIndex);
                             _displayIndices.RemoveAt(uiIndex);
 
-                            // Shift subsequent display indices
+                            // Shift subsequent display indices because the Store indices shifted down
                             for (int i = 0; i < _displayIndices.Count; i++)
                             {
                                 if (_displayIndices[i] > storeIndex) _displayIndices[i]--;
@@ -674,9 +713,6 @@ namespace SharpSFV
                         }
                         catch (Exception ex)
                         {
-                            // On error, maybe skip this file but continue loop? Or stop?
-                            // For bulk delete, usually better to continue or show error at end.
-                            // Here we just log to debug for now.
                             Debug.WriteLine($"Failed to delete {fullPath}: {ex.Message}");
                         }
                     }
@@ -700,6 +736,7 @@ namespace SharpSFV
             {
                 indicesToRemove.Add(_displayIndices[uiIdx]);
             }
+            // Sort descending for safe removal
             indicesToRemove.Sort();
 
             for (int i = indicesToRemove.Count - 1; i >= 0; i--)
@@ -707,6 +744,7 @@ namespace SharpSFV
                 _fileStore.RemoveAt(indicesToRemove[i]);
             }
 
+            // Rebuild Display Indices (simpler than shifting logic for massive removals)
             _displayIndices.Clear();
             for (int i = 0; i < _fileStore.Count; i++) _displayIndices.Add(i);
 

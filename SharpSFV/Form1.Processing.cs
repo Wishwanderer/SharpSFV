@@ -21,6 +21,8 @@ namespace SharpSFV
     public partial class Form1
     {
         // --- METRICS STATE ---
+        // Volatile counters for tracking throughput. 
+        // Interlocked class is used for thread-safe increments without heavy locking.
         private long _totalBytesDetected = 0;
         private long _processedBytes = 0;
         private long _lastSpeedBytes = 0;
@@ -28,6 +30,11 @@ namespace SharpSFV
         private string _cachedSpeedString = "";
 
         // --- STANDARD WRAPPER ---
+
+        /// <summary>
+        /// Entry point for Standard Mode (Drag-and-Drop or Argument-based creation).
+        /// Prepares the UI, determines the drive type (HDD/SSD), and launches the hashing engine.
+        /// </summary>
         private async Task RunHashCreation(string[] paths, string baseDirectory)
         {
             SetProcessingState(true);
@@ -49,10 +56,12 @@ namespace SharpSFV
             _fileStore.Clear();
             _displayIndices.Clear();
 
-            // Display List: Skip for Headless/Create Mode (No List View)
+            // Display List: Skip for Headless/Create Mode (No List View to render)
             if (!_isHeadless && !_isCreateMode) UpdateDisplayList();
 
-            // Determine Processing Mode
+            // Drive Detection Strategy:
+            // HDD = Sequential Processing (Avoids thrashing the drive head).
+            // SSD = Parallel Processing (Maximizes IOPS and CPU usage).
             bool isHDD = false;
             if (_settings.ProcessingMode == ProcessingMode.HDD) isHDD = true;
             else if (_settings.ProcessingMode == ProcessingMode.SSD) isHDD = false;
@@ -72,6 +81,7 @@ namespace SharpSFV
 
             Stopwatch globalSw = Stopwatch.StartNew();
 
+            // Launch the core engine
             int completed = await ExecuteHashingEngine(paths, baseDirectory, isHDD, true, (curr, total, ok, bad) =>
             {
                 ThrottledUiUpdate(curr, total, ok, 0, bad);
@@ -82,6 +92,15 @@ namespace SharpSFV
         }
 
         // --- JOB QUEUE PROCESSOR ---
+
+        /// <summary>
+        /// Processing Loop for Job Mode.
+        /// Continuously pulls "Queued" jobs from the JobStore, processes them one by one, and saves the output.
+        /// <para>
+        /// <b>Memory Management:</b> <see cref="GC.Collect"/> is called explicitly between jobs to 
+        /// ensure the Large Object Heap (LOH) is compacted before starting the next massive dataset.
+        /// </para>
+        /// </summary>
         private async Task ProcessJobQueue()
         {
             if (_isJobQueueRunning) return;
@@ -91,6 +110,7 @@ namespace SharpSFV
             {
                 while (true)
                 {
+                    // 1. Find next Queued Job
                     int currentJobIdx = -1;
 
                     for (int i = 0; i < _jobStore.Count; i++)
@@ -102,7 +122,7 @@ namespace SharpSFV
                         }
                     }
 
-                    if (currentJobIdx == -1) break;
+                    if (currentJobIdx == -1) break; // Queue empty
 
                     if (!_isProcessing) SetProcessingState(true);
 
@@ -133,6 +153,7 @@ namespace SharpSFV
 
                     Stopwatch jobSw = Stopwatch.StartNew();
 
+                    // Detect Drive Type for this specific job
                     bool isHDD = false;
                     if (_settings.ProcessingMode == ProcessingMode.HDD) isHDD = true;
                     else if (_settings.ProcessingMode == ProcessingMode.SSD) isHDD = false;
@@ -145,9 +166,11 @@ namespace SharpSFV
                         }
                     }
 
+                    // Clear Main Store for this job
                     _fileStore.Clear();
                     _displayIndices.Clear();
 
+                    // Run Engine
                     await ExecuteHashingEngine(inputs, rootPath, isHDD, false, (curr, total, ok, bad) =>
                     {
                         if (total > 0)
@@ -159,6 +182,7 @@ namespace SharpSFV
                         ThrottledUiUpdate(curr, total, ok, 0, bad);
                     });
 
+                    // Save Result
                     string algoExt = GetExtensionForAlgo(_currentHashType);
                     string safeRootName = string.Join("_", jobName.Split(Path.GetInvalidFileNameChars()));
                     string fileName = $"{jobId}.{safeRootName}{algoExt}";
@@ -174,6 +198,7 @@ namespace SharpSFV
                     _jobStore.UpdateStatus(currentJobIdx, finalStatus, fullSavePath);
                     _jobStore.UpdateProgress(currentJobIdx, 100.0);
 
+                    // Cleanup before next job
                     _fileStore.Clear();
                     GC.Collect();
 
@@ -200,6 +225,15 @@ namespace SharpSFV
 
         // --- UI / CONSOLE THROTTLING LOGIC ---
 
+        /// <summary>
+        /// Decouples the processing speed from the UI update rate.
+        /// <para>
+        /// <b>Logic:</b>
+        /// 1. Throughput calculation occurs every ~500ms.
+        /// 2. UI repaints are capped at ~60fps (every 16ms or slower).
+        /// 3. Uses <c>Interlocked.CompareExchange</c> to drop frames if the UI thread is busy.
+        /// </para>
+        /// </summary>
         private void ThrottledUiUpdate(int current, int total, int ok, int bad, int missing)
         {
             // 1. Calculate Throughput & ETA (Every ~500ms)
@@ -233,7 +267,7 @@ namespace SharpSFV
                 _lastSpeedBytes = currentBytes;
             }
 
-            // 2. Pure Time-Based Throttle (Use _lastUiUpdateTick)
+            // 2. Pure Time-Based Throttle (Use _lastUiUpdateTick) to prevent message pump flooding
             if (current < total)
             {
                 long last = Interlocked.Read(ref _lastUiUpdateTick);
@@ -241,6 +275,8 @@ namespace SharpSFV
             }
 
             // 3. Drop-Frame Mechanism
+            // If _uiBusy is 1 (locked), CompareExchange fails and returns 1, skipping the block.
+            // If _uiBusy is 0 (free), it sets it to 1 and enters the block.
             if (Interlocked.CompareExchange(ref _uiBusy, 1, 0) == 0)
             {
                 Interlocked.Exchange(ref _lastUiUpdateTick, now);
@@ -258,7 +294,7 @@ namespace SharpSFV
                     return;
                 }
 
-                // GUI Output
+                // GUI Output (BeginInvoke avoids blocking the worker thread)
                 this.BeginInvoke(new Action(() =>
                 {
                     try
@@ -278,24 +314,22 @@ namespace SharpSFV
 
                         if (_isCreateMode)
                         {
-                            // Mini Mode
                             if (_lblProgress != null) _lblProgress.Text = $"Processing: {current} / {safeTotal}";
                         }
                         else if (_isJobMode)
                         {
-                            // Job Mode
                             UpdateJobStats(_cachedSpeedString);
                             lvFiles.Invalidate();
                         }
                         else
                         {
-                            // Standard Mode
                             UpdateStats(current, safeTotal, ok, bad, missing, _cachedSpeedString);
                             lvFiles.Invalidate();
                         }
                     }
                     finally
                     {
+                        // Release lock
                         Interlocked.Exchange(ref _uiBusy, 0);
                     }
                 }));
@@ -303,24 +337,42 @@ namespace SharpSFV
         }
 
         // --- SHARED HASHING ENGINE ---
+
+        /// <summary>
+        /// The Core Producer/Consumer Engine.
+        /// <para>
+        /// <b>Architecture:</b>
+        /// 1. <b>Producer:</b> Single Task. Recursively enumerates files and pushes <see cref="FileJob"/> structs into a Channel.
+        /// 2. <b>Channel:</b> Bounded (Backpressure enabled). Limits memory usage by pausing the Producer if Consumers fall behind.
+        /// 3. <b>Consumers:</b> Multiple Tasks (1 for HDD, N for SSD). Pop jobs, open file handles, and compute hashes.
+        /// </para>
+        /// </summary>
+        /// <param name="updateFileList">If true, updates the UI ListView as files are discovered (Standard Mode). If false, runs silently (Job Mode).</param>
         private async Task<int> ExecuteHashingEngine(string[] paths, string baseDirectory, bool isHDD, bool updateFileList, Action<int, int, int, int> progressCallback)
         {
             _cts = new CancellationTokenSource();
+
+            // Critical for performance: Tells GC to perform fewer blocking collections during this high-load phase.
             GCLatencyMode oldMode = GCSettings.LatencyMode;
             GCSettings.LatencyMode = GCLatencyMode.SustainedLowLatency;
 
             int completed = 0, okCount = 0, errorCount = 0;
             int totalFilesDiscovered = 0;
-            int consumerCount = isHDD ? 1 : Environment.ProcessorCount;
-            int bufferSize = isHDD ? 8 * 1024 * 1024 : 512 * 1024;
 
+            // HDD = 1 Thread (Head seek latency kills parallel performance).
+            // SSD = N Threads (Saturates high IOPS and CPU).
+            int consumerCount = isHDD ? 1 : Environment.ProcessorCount;
+            int bufferSize = isHDD ? 8 * 1024 * 1024 : 512 * 1024; // 8MB Sequential vs 512KB Parallel
+
+            // Channel Configuration
             var channel = Channel.CreateBounded<FileJob>(new BoundedChannelOptions(50000)
             {
                 SingleReader = false,
                 SingleWriter = true,
-                FullMode = BoundedChannelFullMode.Wait
+                FullMode = BoundedChannelFullMode.Wait // Pause Producer if full
             });
 
+            // --- PRODUCER TASK ---
             var producer = Task.Run(async () =>
             {
                 try
@@ -330,6 +382,7 @@ namespace SharpSFV
                     long lastBatchTime = DateTime.UtcNow.Ticks;
                     string pooledBase = StringPool.GetOrAdd(baseDirectory);
 
+                    // Local function to flush discovered files to UI in batches (prevents UI freeze)
                     void FlushUiBatch()
                     {
                         if (uiBatch.Count == 0 || !updateFileList) return;
@@ -400,24 +453,30 @@ namespace SharpSFV
                 }
                 finally
                 {
+                    // Signal consumers that no more data is coming
                     channel.Writer.Complete();
                 }
             });
 
+            // --- CONSUMER TASKS ---
             var consumers = new Task[consumerCount];
             for (int i = 0; i < consumerCount; i++)
             {
                 consumers[i] = Task.Run(async () =>
                 {
+                    // Rent a buffer for this thread. 
+                    // Zero-Allocation: We reuse this buffer for every file this thread processes.
                     byte[] sharedBuffer = ArrayPool<byte>.Shared.Rent(bufferSize);
                     HashAlgorithm? reusedAlgo = null;
 
                     try
                     {
+                        // Instantiate Algorithm once per thread (reused)
                         if (_currentHashType == HashType.MD5) reusedAlgo = MD5.Create();
                         else if (_currentHashType == HashType.SHA1) reusedAlgo = SHA1.Create();
                         else if (_currentHashType == HashType.SHA256) reusedAlgo = SHA256.Create();
 
+                        // Consume loop
                         while (await channel.Reader.WaitToReadAsync())
                         {
                             while (channel.Reader.TryRead(out FileJob job))
@@ -431,6 +490,8 @@ namespace SharpSFV
 
                                 try
                                 {
+                                    // Handle-Based File Access
+                                    // Use File.OpenHandle instead of FileStream for RandomAccess support.
                                     using (Microsoft.Win32.SafeHandles.SafeFileHandle handle = File.OpenHandle(
                                         job.FullPath,
                                         FileMode.Open,
@@ -439,6 +500,10 @@ namespace SharpSFV
                                         FileOptions.SequentialScan))
                                     {
                                         long len = RandomAccess.GetLength(handle);
+
+                                        // Strategy Switch: 
+                                        // Small Files (<50MB): Use RandomAccess (Low overhead).
+                                        // Large Files (>50MB): Use FileStream wrapper (Reports progress events).
                                         if (len > LargeFileThreshold)
                                         {
                                             using (var fs = new FileStream(handle, FileAccess.Read))
@@ -457,6 +522,7 @@ namespace SharpSFV
                                         }
                                         else
                                         {
+                                            // Optimized Handle-Based Hashing
                                             long pos = 0;
                                             int read;
 
@@ -498,6 +564,7 @@ namespace SharpSFV
                                 }
                                 catch { status = ItemStatus.Error; }
 
+                                // Metrics & Results
                                 long endTick = Stopwatch.GetTimestamp();
                                 double elapsedMs = (double)(endTick - startTick) * 1000 / Stopwatch.Frequency;
                                 string timeStr = $"{(long)elapsedMs} ms";
@@ -516,6 +583,7 @@ namespace SharpSFV
                                 }
                                 else
                                 {
+                                    // Verification Logic
                                     bool isMatch = hashBytes.SequenceEqual(job.ExpectedHash);
                                     if (isMatch)
                                     {
@@ -529,6 +597,7 @@ namespace SharpSFV
                                     }
                                 }
 
+                                // Write Result to SoA Store
                                 _fileStore.SetResult(job.Index, hashBytes, timeStr, statusFinal);
 
                                 int currentCompleted = Interlocked.Increment(ref completed);
@@ -538,6 +607,7 @@ namespace SharpSFV
                     }
                     finally
                     {
+                        // Clean up thread-local resources
                         ArrayPool<byte>.Shared.Return(sharedBuffer);
                         reusedAlgo?.Dispose();
                     }
@@ -624,6 +694,11 @@ namespace SharpSFV
         }
 
         // --- VERIFICATION ENGINE ---
+
+        /// <summary>
+        /// Entry point for Verifying existing checksum files (.sfv, .md5, etc.).
+        /// Includes parsing logic and special handling for "Endian Mismatch" in legacy SFV files.
+        /// </summary>
         private async Task RunVerification(string checkFilePath)
         {
             SetProcessingState(true);
@@ -634,7 +709,7 @@ namespace SharpSFV
             _lastSpeedBytes = 0;
             _lastSpeedTick = Environment.TickCount64;
             _cachedSpeedString = "";
-            _legacySfvDetected = false; // Reset legacy flag
+            _legacySfvDetected = false;
 
             GCLatencyMode oldMode = GCSettings.LatencyMode;
             GCSettings.LatencyMode = GCLatencyMode.SustainedLowLatency;
@@ -656,6 +731,7 @@ namespace SharpSFV
             var parsedLines = new List<(byte[] ExpectedHash, string Filename)>();
             StringBuilder sbComments = new StringBuilder();
 
+            // Parsing Logic
             try
             {
                 foreach (var line in await File.ReadAllLinesAsync(checkFilePath))
@@ -672,6 +748,7 @@ namespace SharpSFV
                     Match matchA = Regex.Match(line, @"^\s*([0-9a-fA-F]+)\s+\*?(.*?)\s*$");
                     Match matchB = Regex.Match(line, @"^\s*(.*?)\s+([0-9a-fA-F]{8})\s*$");
 
+                    // SFV usually puts filename first, then hash. Others put hash first.
                     if (verificationAlgo == HashType.Crc32 && matchB.Success) { filename = matchB.Groups[1].Value.Trim(); expectedHashStr = matchB.Groups[2].Value; }
                     else if (matchA.Success) { expectedHashStr = matchA.Groups[1].Value.Trim(); filename = matchA.Groups[2].Value.Trim(); }
 
@@ -697,6 +774,7 @@ namespace SharpSFV
                 if (_commentsPanel != null) _commentsPanel.Visible = !string.IsNullOrWhiteSpace(commentText);
             }
 
+            // Populate FileStore
             _fileStore.Clear();
             _displayIndices.Clear();
 
@@ -714,6 +792,7 @@ namespace SharpSFV
 
             if (!_isHeadless)
             {
+                // Sort by path for verification visual
                 _displayIndices.Sort((a, b) => string.Compare(_fileStore.GetFullPath(a), _fileStore.GetFullPath(b), StringComparison.OrdinalIgnoreCase));
                 UpdateDisplayList();
                 UpdateStats(0, _fileStore.Count, 0, 0, missingCount);
@@ -741,6 +820,7 @@ namespace SharpSFV
             Stopwatch globalSw = Stopwatch.StartNew();
             var channel = Channel.CreateBounded<FileJob>(50000);
 
+            // --- PRODUCER (VERIFICATION) ---
             var producer = Task.Run(async () =>
             {
                 try
@@ -753,6 +833,7 @@ namespace SharpSFV
                         string fullPath = _fileStore.GetFullPath(idx);
                         byte[]? expected = _fileStore.ExpectedHashes[idx];
 
+                        // Verification Logic: Check existence first
                         if (File.Exists(fullPath))
                         {
                             try { Interlocked.Add(ref _totalBytesDetected, new FileInfo(fullPath).Length); } catch { }
@@ -771,13 +852,13 @@ namespace SharpSFV
                 finally { channel.Writer.Complete(); }
             });
 
-            // Smart Buffering for Verification
+            // --- CONSUMERS (VERIFICATION) ---
             int bufferSize = isHDD ? 8 * 1024 * 1024 : 512 * 1024;
             int consumerCount = isHDD ? 1 : Environment.ProcessorCount;
             var consumers = new Task[consumerCount];
 
             // Reusable buffer allocation OUTSIDE the loop to prevent Stack Overflow (CA2014)
-            byte[] endianBuffer = new byte[64]; // Max hash size
+            byte[] endianBuffer = new byte[64];
 
             for (int i = 0; i < consumerCount; i++)
             {
@@ -827,7 +908,7 @@ namespace SharpSFV
                                         }
                                         else
                                         {
-                                            // Handle-Based Hashing & Metrics
+                                            // Handle-Based Hashing
                                             long pos = 0;
                                             int read;
 
@@ -888,6 +969,7 @@ namespace SharpSFV
                                 else
                                 {
                                     // Mismatch found. Check for Endian Flip (Only for CRC32)
+                                    // Some legacy tools write CRC32 in Big Endian (Inverse of Windows Little Endian)
                                     bool recovered = false;
 
                                     if (verificationAlgo == HashType.Crc32 && job.ExpectedHash != null)

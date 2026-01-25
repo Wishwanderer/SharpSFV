@@ -5,28 +5,45 @@ using System.Runtime.InteropServices;
 namespace SharpSFV
 {
     /// <summary>
-    /// OPTIMIZATION #4: String Pooling
-    /// Reduces managed heap usage by deduplicating strings.
-    /// Critical for datasets where thousands of files share the same folder structure.
+    /// A thread-safe string interning pool designed to reduce managed heap allocations.
+    /// <para>
+    /// <b>Problem Solved:</b> 
+    /// When scanning deep directory structures (e.g., "C:\Data\Photos\2021\"), thousands of files 
+    /// share identical directory strings. Standard string allocation creates a new object for every file, 
+    /// wasting megabytes of RAM.
+    /// </para>
+    /// <para>
+    /// <b>Solution:</b> 
+    /// This pool stores unique strings. If a requested string exists, the existing reference is returned.
+    /// Unlike <c>String.Intern</c>, this pool can be cleared to release memory.
+    /// </para>
     /// </summary>
     public static class StringPool
     {
-        // Dictionary<string, string> acts as the store.
-        // We store the string as both Key and Value so we can return the reference.
+        // Dictionary acts as the store. Key=String, Value=String.
+        // We store the string as the Value so we can return the reference to the caller.
         private static readonly Dictionary<string, string> _pool = new(StringComparer.Ordinal);
         private static readonly object _lock = new();
 
         /// <summary>
-        /// Gets an existing string instance for the provided span, or creates a new one.
-        /// Uses .NET 10 AlternateLookup to avoid allocating a key for the lookup.
+        /// Gets an existing string instance for the provided span, or creates a new one if not found.
+        /// <para>
+        /// <b>Optimization:</b> 
+        /// Uses <c>GetAlternateLookup&lt;ReadOnlySpan&lt;char&gt;&gt;</c>. 
+        /// This allows us to query the Dictionary using a stack-allocated Span 
+        /// <i>without</i> allocating a temporary string just to perform the lookup key comparison.
+        /// A new string is allocated on the heap <i>only</i> if it does not already exist.
+        /// </para>
         /// </summary>
+        /// <param name="span">The character span to look up.</param>
+        /// <returns>The pooled string reference.</returns>
         public static string GetOrAdd(ReadOnlySpan<char> span)
         {
             if (span.IsEmpty) return string.Empty;
 
             lock (_lock)
             {
-                // Lookup dictionary entries using Span<char>
+                // .NET 9+ feature: Lookup dictionary entries using Span<char> to avoid allocation on hit.
                 var lookup = _pool.GetAlternateLookup<ReadOnlySpan<char>>();
 
                 if (lookup.TryGetValue(span, out string? existing))
@@ -43,6 +60,7 @@ namespace SharpSFV
 
         /// <summary>
         /// Gets an existing string instance for the provided string.
+        /// Used when the input is already a string but we want to discard duplicates to save memory long-term.
         /// </summary>
         public static string GetOrAdd(string text)
         {
@@ -60,6 +78,10 @@ namespace SharpSFV
             }
         }
 
+        /// <summary>
+        /// Clears the pool. Should be called when the application state is reset (e.g., closing a file list)
+        /// to allow the Garbage Collector to reclaim the pooled strings.
+        /// </summary>
         public static void Clear()
         {
             lock (_lock)

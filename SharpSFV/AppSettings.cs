@@ -6,16 +6,32 @@ using System.Windows.Forms;
 
 namespace SharpSFV
 {
+    /// <summary>
+    /// Manages application configuration and state persistence.
+    /// <para>
+    /// <b>Design Choice:</b> 
+    /// Settings are stored in a simple "SharpSFV.ini" text file adjacent to the executable.
+    /// This makes the application fully portable and ensures user preferences (window size, 
+    /// column order, defaults) are preserved across version upgrades without relying on the Windows Registry.
+    /// </para>
+    /// </summary>
     public class AppSettings
     {
         private readonly string _iniPath;
+
+        // --- UI Preferences ---
         public bool ShowTimeTab { get; set; } = false;
-        public PathStorageMode PathStorageMode { get; set; } = PathStorageMode.Relative;
         public bool ShowFilterPanel { get; set; } = false;
-        public ProcessingMode ProcessingMode { get; set; } = ProcessingMode.Auto;
-        public bool ShowFullPaths { get; set; } = false;
         public bool ShowThroughputStats { get; set; } = false;
         public bool ShowAdvancedBar { get; set; } = false;
+        public bool ShowFullPaths { get; set; } = false;
+        public bool ShowHashCol { get; set; } = true;
+        public bool ShowExpectedHashCol { get; set; } = true;
+        public bool LockColumns { get; set; } = true;
+
+        // --- Operation Defaults ---
+        public PathStorageMode PathStorageMode { get; set; } = PathStorageMode.Relative;
+        public ProcessingMode ProcessingMode { get; set; } = ProcessingMode.Auto;
         public bool EnableChecksumComments { get; set; } = false;
         public string PathPrefix { get; set; } = "";
         public string IncludePattern { get; set; } = "";
@@ -23,14 +39,17 @@ namespace SharpSFV
         public bool ScanRecursive { get; set; } = true;
         public string CustomSignature { get; set; } = "L33T";
         public HashType DefaultAlgo { get; set; } = HashType.XXHASH3;
+
+        // --- Window Geometry ---
         public Size WindowSize { get; set; } = new Size(800, 600);
         public Point WindowLocation { get; set; } = Point.Empty;
         public bool HasCustomLocation { get; private set; } = false;
         public int SplitterDistance { get; set; } = -1;
-        public bool ShowHashCol { get; set; } = true;
-        public bool ShowExpectedHashCol { get; set; } = true;
-        public bool LockColumns { get; set; } = true;
 
+        /// <summary>
+        /// Maps Column Tags to their user-defined DisplayIndex.
+        /// Example: "Name" -> 0, "Hash" -> 1.
+        /// </summary>
         public Dictionary<string, int> ColumnOrder { get; set; } = new Dictionary<string, int>();
 
         public AppSettings(string appExecutablePath)
@@ -39,6 +58,10 @@ namespace SharpSFV
             _iniPath = Path.Combine(exeDir, "SharpSFV.ini");
         }
 
+        /// <summary>
+        /// Parses the INI file line-by-line. 
+        /// Fails silently on parse errors to ensure the app still launches with default settings.
+        /// </summary>
         public void Load()
         {
             if (!File.Exists(_iniPath)) return;
@@ -59,50 +82,52 @@ namespace SharpSFV
                     string key = parts[0].Trim();
                     string val = parts[1].Trim();
 
+                    // UI Layout
                     if (key.Equals("TimeTab", StringComparison.OrdinalIgnoreCase)) ShowTimeTab = (val == "1");
-
-                    // NEW
                     else if (key.Equals("ShowThroughputStats", StringComparison.OrdinalIgnoreCase)) ShowThroughputStats = (val == "1");
+                    else if (key.Equals("ShowFilterPanel", StringComparison.OrdinalIgnoreCase)) ShowFilterPanel = (val == "1");
+                    else if (key.Equals("ShowAdvancedBar", StringComparison.OrdinalIgnoreCase)) ShowAdvancedBar = (val == "1");
+                    else if (key.Equals("ShowFullPaths", StringComparison.OrdinalIgnoreCase)) ShowFullPaths = (val == "1");
+                    else if (key.Equals("ShowHashCol", StringComparison.OrdinalIgnoreCase)) ShowHashCol = (val == "1");
+                    else if (key.Equals("ShowExpectedHashCol", StringComparison.OrdinalIgnoreCase)) ShowExpectedHashCol = (val == "1");
+                    else if (key.Equals("LockColumns", StringComparison.OrdinalIgnoreCase)) LockColumns = (val == "1");
 
+                    // Modes
                     else if (key.Equals("PathStorageMode", StringComparison.OrdinalIgnoreCase))
                     {
                         if (Enum.TryParse<PathStorageMode>(val, true, out var result)) PathStorageMode = result;
                     }
                     else if (key.Equals("UseAbsolutePaths", StringComparison.OrdinalIgnoreCase))
                     {
-                        if (val == "1") PathStorageMode = PathStorageMode.Absolute;
+                        if (val == "1") PathStorageMode = PathStorageMode.Absolute; // Legacy support
                     }
-
-                    else if (key.Equals("ShowFilterPanel", StringComparison.OrdinalIgnoreCase)) ShowFilterPanel = (val == "1");
-
-                    // Advanced Bar Loading
-                    else if (key.Equals("ShowAdvancedBar", StringComparison.OrdinalIgnoreCase)) ShowAdvancedBar = (val == "1");
-                    else if (key.Equals("EnableChecksumComments", StringComparison.OrdinalIgnoreCase)) EnableChecksumComments = (val == "1");
-                    else if (key.Equals("PathPrefix", StringComparison.OrdinalIgnoreCase)) PathPrefix = val;
-                    else if (key.Equals("IncludePattern", StringComparison.OrdinalIgnoreCase)) IncludePattern = val;
-                    else if (key.Equals("ExcludePattern", StringComparison.OrdinalIgnoreCase)) ExcludePattern = val;
-                    else if (key.Equals("ScanRecursive", StringComparison.OrdinalIgnoreCase)) ScanRecursive = (val == "1");
-
                     else if (key.Equals("ProcessingMode", StringComparison.OrdinalIgnoreCase))
                     {
                         if (Enum.TryParse<ProcessingMode>(val, true, out var result)) ProcessingMode = result;
                     }
                     else if (key.Equals("OptimizeForHDD", StringComparison.OrdinalIgnoreCase))
                     {
-                        if (val == "1") ProcessingMode = ProcessingMode.HDD;
+                        if (val == "1") ProcessingMode = ProcessingMode.HDD; // Legacy support
                     }
 
-                    else if (key.Equals("ShowFullPaths", StringComparison.OrdinalIgnoreCase)) ShowFullPaths = (val == "1");
-                    else if (key.Equals("ShowHashCol", StringComparison.OrdinalIgnoreCase)) ShowHashCol = (val == "1");
-                    else if (key.Equals("ShowExpectedHashCol", StringComparison.OrdinalIgnoreCase)) ShowExpectedHashCol = (val == "1");
-                    else if (key.Equals("LockColumns", StringComparison.OrdinalIgnoreCase)) LockColumns = (val == "1");
+                    // Advanced Options
+                    else if (key.Equals("EnableChecksumComments", StringComparison.OrdinalIgnoreCase)) EnableChecksumComments = (val == "1");
+                    else if (key.Equals("PathPrefix", StringComparison.OrdinalIgnoreCase)) PathPrefix = val;
+                    else if (key.Equals("IncludePattern", StringComparison.OrdinalIgnoreCase)) IncludePattern = val;
+                    else if (key.Equals("ExcludePattern", StringComparison.OrdinalIgnoreCase)) ExcludePattern = val;
+                    else if (key.Equals("ScanRecursive", StringComparison.OrdinalIgnoreCase)) ScanRecursive = (val == "1");
+                    else if (key.Equals("Signature", StringComparison.OrdinalIgnoreCase)) CustomSignature = val;
+
+                    // ListView Customization
                     else if (key.Equals("ColumnOrder", StringComparison.OrdinalIgnoreCase)) ParseColumnOrder(val);
 
-                    else if (key.Equals("Signature", StringComparison.OrdinalIgnoreCase)) CustomSignature = val;
+                    // Crypto Choice
                     else if (key.Equals("DefaultAlgo", StringComparison.OrdinalIgnoreCase))
                     {
                         if (Enum.TryParse<HashType>(val, true, out var result)) DefaultAlgo = result;
                     }
+
+                    // Window Geometry
                     else if (key.Equals("WindowSizeW", StringComparison.OrdinalIgnoreCase)) int.TryParse(val, out w);
                     else if (key.Equals("WindowSizeH", StringComparison.OrdinalIgnoreCase)) int.TryParse(val, out h);
                     else if (key.Equals("WindowPosX", StringComparison.OrdinalIgnoreCase)) { if (int.TryParse(val, out x)) foundX = true; }
@@ -123,6 +148,10 @@ namespace SharpSFV
             catch { }
         }
 
+        /// <summary>
+        /// Parses the serialized Column Order string.
+        /// Format: "Name:0,Hash:1,Status:2"
+        /// </summary>
         private void ParseColumnOrder(string val)
         {
             try
@@ -141,10 +170,14 @@ namespace SharpSFV
             catch { }
         }
 
+        /// <summary>
+        /// Serializes the current application state to the INI file.
+        /// </summary>
         public void Save(Form form, bool isTimeTabEnabled, HashType currentAlgo, int currentSplitterDist, ListView lv)
         {
             try
             {
+                // Prevent saving minimized window sizes
                 Rectangle bounds = (form.WindowState == FormWindowState.Normal) ? form.Bounds : form.RestoreBounds;
 
                 string colOrderStr = "";

@@ -12,9 +12,20 @@ namespace SharpSFV
     {
         private CheckBox? _chkComments;
 
+        /// <summary>
+        /// Initializes the application layout dynamically based on the execution mode.
+        /// <para>
+        /// <b>Design Choice:</b> 
+        /// Controls like the Filter Panel, Advanced Options, and Stats Panel are built in code 
+        /// rather than the VS Designer. This provides cleaner control over the z-order and 
+        /// docking logic when switching between the complex "Standard Mode" and the compact "Mini Mode".
+        /// </para>
+        /// </summary>
         private void SetupLayout()
         {
             if (_isHeadless || _isCreateMode) return;
+
+            // Initialize sub-components if they don't exist yet
             if (_mainSplitter == null || lvFiles == null) SetupActiveJobsPanel();
             if (_menuStrip == null) SetupCustomMenu();
             if (_statsPanel == null) SetupStatsPanel();
@@ -25,6 +36,7 @@ namespace SharpSFV
             this.Controls.Clear();
             this.MinimumSize = new Size(600, 400);
 
+            // Progress Bar Panel (Bottom Dock)
             Panel progressPanel = new Panel { Height = 15, Dock = DockStyle.Bottom, Padding = new Padding(2) };
 
             if (progressBarTotal != null)
@@ -33,12 +45,14 @@ namespace SharpSFV
                 progressPanel.Controls.Add(progressBarTotal);
             }
 
+            // Configure Main List View
             if (lvFiles != null)
             {
                 lvFiles.Dock = DockStyle.Fill;
                 lvFiles.Scrollable = true;
             }
 
+            // Configure Split Container (Active Jobs Panel)
             if (_mainSplitter != null)
             {
                 _mainSplitter.Dock = DockStyle.Fill;
@@ -48,6 +62,8 @@ namespace SharpSFV
                 }
             }
 
+            // Add Controls to Form (Order matters for Docking!)
+            // Dock: Bottom -> Top -> Fill
             if (_mainSplitter != null) this.Controls.Add(_mainSplitter);
             else if (lvFiles != null) this.Controls.Add(lvFiles);
 
@@ -61,6 +77,11 @@ namespace SharpSFV
         }
 
         // --- MINI MODE LAYOUT (Streamlined) ---
+
+        /// <summary>
+        /// Configures a compact, fixed-size dialog for "Context Menu" operations.
+        /// Removes lists, menus, and options, showing only Progress and Stop/Pause controls.
+        /// </summary>
         public void SetupMiniLayout()
         {
             // Ensure necessary controls exist
@@ -261,6 +282,7 @@ namespace SharpSFV
             _statsFlowPanel.Controls.Add(_lblStatsBad);
             _statsFlowPanel.Controls.Add(_lblStatsMissing);
 
+            // Control Buttons
             int btnWidth = 75;
             int btnHeight = 26;
             int margin = 10;
@@ -312,6 +334,7 @@ namespace SharpSFV
             Label lblSearch = new Label { Text = "Search:", AutoSize = true, Location = new Point(10, 8) };
             _txtFilter = new TextBox { Width = 200, Location = new Point(60, 5) };
 
+            // Trigger Debounce timer on text change
             _txtFilter.TextChanged += (s, e) => { _filterDebounceTimer?.Change(300, System.Threading.Timeout.Infinite); };
 
             Label lblStatus = new Label { Text = "Status:", AutoSize = true, Location = new Point(280, 8) };
@@ -328,6 +351,9 @@ namespace SharpSFV
             _filterDebounceTimer = new System.Threading.Timer(OnFilterDebounce, null, System.Threading.Timeout.Infinite, System.Threading.Timeout.Infinite);
         }
 
+        /// <summary>
+        /// Reconfigures the ListView columns based on the current mode (Verification vs Creation).
+        /// </summary>
         private void SetupUIForMode(string mode)
         {
             if (_isJobMode) return;
@@ -372,6 +398,7 @@ namespace SharpSFV
                 this.Text = (_isVerificationMode) ? "SharpSFV - Verify" : "SharpSFV";
             }
 
+            // Restore Column Order from Settings
             if (_settings.ColumnOrder.Count > 0)
             {
                 foreach (ColumnHeader ch in lvFiles.Columns)
@@ -386,6 +413,11 @@ namespace SharpSFV
             lvFiles.ColumnWidthChanging += LvFiles_ColumnWidthChanging;
         }
 
+        /// <summary>
+        /// Switches the entire application state between Standard Mode and Job Queue Mode.
+        /// This involves completely swapping the ListView columns and hiding/showing entire panels.
+        /// </summary>
+        /// <param name="jobMode">True for Job Mode, False for Standard Mode.</param>
         private void SetAppMode(bool jobMode)
         {
             if (_isJobMode == jobMode) return;
@@ -401,12 +433,14 @@ namespace SharpSFV
 
             if (_isJobMode)
             {
+                // -- JOB MODE LAYOUT --
                 AddCol("Job Name", 250, "JobName");
                 AddCol("Root Path", 350, "RootPath");
                 AddCol("Progress", 100, "Progress");
                 AddCol("Status", 100, "Status");
                 AddCol("Time", 100, "Time");
 
+                // Hide Standard Mode Panels
                 if (_mainSplitter != null) _mainSplitter.Panel1Collapsed = true;
                 if (_filterPanel != null) _filterPanel.Visible = false;
                 if (_advancedPanel != null) _advancedPanel.Visible = false;
@@ -422,6 +456,7 @@ namespace SharpSFV
             }
             else
             {
+                // -- STANDARD MODE LAYOUT --
                 SetupUIForMode("Creation");
                 if (_settings.ShowFilterPanel && _filterPanel != null) _filterPanel.Visible = true;
                 if (_settings.ShowAdvancedBar && _advancedPanel != null) _advancedPanel.Visible = true;
@@ -551,6 +586,7 @@ namespace SharpSFV
             {
                 this.StartPosition = FormStartPosition.Manual;
                 this.Location = _settings.WindowLocation;
+                // Ensure window is not off-screen
                 bool isOnScreen = Screen.AllScreens.Any(s => s.WorkingArea.IntersectsWith(this.Bounds));
                 if (!isOnScreen) this.StartPosition = FormStartPosition.CenterScreen;
             }
@@ -596,7 +632,6 @@ namespace SharpSFV
 
         private void ToggleFilterPanel()
         {
-            // Safety guard: If in Job Mode, do not toggle
             if (_isJobMode) return;
 
             _settings.ShowFilterPanel = _menuOptionsFilter?.Checked ?? false;
@@ -611,6 +646,7 @@ namespace SharpSFV
 
             RecalculateColumnWidths();
 
+            // Find the Name column
             int nameColIdx = -1;
             foreach (ColumnHeader ch in lvFiles.Columns)
             {
@@ -638,6 +674,7 @@ namespace SharpSFV
                 return;
             }
 
+            // Estimate width based on longest string to avoid slow "AutoResizeColumns" call
             string longestPath = "";
             string longestName = "";
             int maxPathLen = -1;

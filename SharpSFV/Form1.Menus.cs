@@ -12,15 +12,23 @@ namespace SharpSFV
 {
     public partial class Form1
     {
-        // Menu References
+        // Menu References (Required for toggling checked states programmatically)
         private ToolStripMenuItem? _menuModeStandard;
         private ToolStripMenuItem? _menuModeJob;
         private ToolStripMenuItem? _menuViewThroughput;
 
-        // Bad File Tool References
+        // Bad File Tool References (Enabled only when Bad/Error items exist)
         private ToolStripMenuItem? _menuMoveBad;
         private ToolStripMenuItem? _menuRenameBad;
 
+        /// <summary>
+        /// Builds the Main Menu Strip programmatically.
+        /// <para>
+        /// <b>Architecture Choice:</b>
+        /// Constructing menus in code avoids the bloat of the Designer.cs file and allows 
+        /// for cleaner assignment of Lambda event handlers, keeping the logic close to the definition.
+        /// </para>
+        /// </summary>
         private void SetupCustomMenu()
         {
             _menuStrip = new MenuStrip { Dock = DockStyle.Top };
@@ -41,6 +49,7 @@ namespace SharpSFV
             menuEdit.DropDownItems.Add(new ToolStripMenuItem("Select All", null, (s, e) => PerformSelectAllAction()) { ShortcutKeys = Keys.Control | Keys.A });
 
             // --- MODE MENU ---
+            // Toggles between Standard (File List) and Job (Queue) modes.
             var menuMode = new ToolStripMenuItem("Mode");
             _menuModeStandard = new ToolStripMenuItem("Standard Mode", null, (s, e) => SetAppMode(false));
             _menuModeJob = new ToolStripMenuItem("Job Queue Mode", null, (s, e) => SetAppMode(true));
@@ -50,6 +59,8 @@ namespace SharpSFV
 
             // --- VIEW MENU ---
             var menuView = new ToolStripMenuItem("View");
+
+            // Helper to toggle internal settings and trigger UI refresh
             _menuViewHash = new ToolStripMenuItem("Show Hash", null, (s, e) => {
                 _settings.ShowHashCol = !_settings.ShowHashCol;
                 if (_isJobMode) lvFiles.Invalidate();
@@ -116,6 +127,7 @@ namespace SharpSFV
             menuSystem.DropDownItems.Add(new ToolStripMenuItem("Register Explorer Context Menu", null, (s, e) => PerformRegisterShell()));
             menuSystem.DropDownItems.Add(new ToolStripMenuItem("Unregister Explorer Context Menu", null, (s, e) => PerformUnregisterShell()));
 
+            // Bad File Tools (Context-Sensitive: Enabled only when bad files are present)
             var menuBadTools = new ToolStripMenuItem("Bad File Tools");
             _menuMoveBad = new ToolStripMenuItem("Move Bad Files to '_BAD_FILES'...", null, (s, e) => PerformMoveBadFiles()) { Enabled = false };
             _menuRenameBad = new ToolStripMenuItem("Rename Bad Files (*.CORRUPT)...", null, (s, e) => PerformRenameBadFiles()) { Enabled = false };
@@ -160,6 +172,14 @@ namespace SharpSFV
             _algoMenuItems[type] = item;
         }
 
+        /// <summary>
+        /// Builds the Right-Click Context Menu for the ListView.
+        /// <para>
+        /// <b>Dynamic Logic:</b>
+        /// Uses the <c>Opening</c> event to customize the menu items based on what is selected.
+        /// Example: "Copy Entry" becomes "Copy Entries" if multiple files are selected.
+        /// </para>
+        /// </summary>
         private void SetupContextMenu()
         {
             _ctxMenu = new ContextMenuStrip();
@@ -179,8 +199,10 @@ namespace SharpSFV
                 itemRemove
             });
 
+            // On-the-fly customization based on selection state
             _ctxMenu.Opening += (s, e) =>
             {
+                // Disable context menu in Job Mode or if nothing is selected
                 if (_isJobMode) { e.Cancel = true; return; }
                 if (lvFiles.SelectedIndices.Count == 0) { e.Cancel = true; return; }
 

@@ -6,9 +6,18 @@ using System.Windows.Forms;
 namespace SharpSFV
 {
     /// <summary>
-    /// Index-Based Sorter:
-    /// Implements IComparer<int> to sort indices based on data in the FileStore arrays.
-    /// Eliminates object pointer chasing during sort operations.
+    /// Implements Indirect Sorting for the Virtual ListView.
+    /// <para>
+    /// <b>Architecture Choice:</b>
+    /// Since our data is stored in parallel arrays (SoA) within <see cref="FileStore"/>, we cannot use standard object sorting.
+    /// Instead, we sort a <c>List&lt;int&gt;</c> of indices.
+    /// This comparer takes two indices (<paramref name="x"/>, <paramref name="y"/>), looks up the actual data 
+    /// in the <see cref="FileStore"/>, and decides their order.
+    /// </para>
+    /// <para>
+    /// <b>Performance:</b> 
+    /// Avoids moving heavy data in memory. Only integer pointers are swapped during the sort operation.
+    /// </para>
     /// </summary>
     public class FileListSorter : IComparer<int>
     {
@@ -22,13 +31,18 @@ namespace SharpSFV
             _store = store;
         }
 
+        /// <summary>
+        /// Compares two items via their indices.
+        /// </summary>
+        /// <param name="x">The index of the first item in the FileStore.</param>
+        /// <param name="y">The index of the second item in the FileStore.</param>
         public int Compare(int x, int y)
         {
-            // Safety checks
+            // Safety checks: Ensure indices are within bounds of the arrays
             if (x < 0 || x >= _store.Count) return 0;
             if (y < 0 || y >= _store.Count) return 0;
 
-            // Summary rows always go to the bottom
+            // Priority Logic: Summary rows (e.g., "Total Time") must always stay at the bottom.
             bool xSummary = _store.IsSummaryRows[x];
             bool ySummary = _store.IsSummaryRows[y];
 
@@ -43,27 +57,28 @@ namespace SharpSFV
             }
 
             int result = 0;
+
+            // Switch based on the currently clicked column index
             switch (SortColumn)
             {
                 case 0: // File Name
-                    // Note: Sorting by Name usually implies Full Path if verified, 
-                    // but the column usually shows just Name. 
-                    // To keep it fast, we sort by the FileName array.
+                    // Note: Sorting by Name uses the FileName array, not FullPath, for speed.
                     result = string.Compare(_store.FileNames[x], _store.FileNames[y], StringComparison.OrdinalIgnoreCase);
                     break;
                 case 1: // Hash
+                    // Custom byte[] comparison required (Arrays don't implement IComparable naturally)
                     result = CompareHashes(_store.CalculatedHashes[x], _store.CalculatedHashes[y]);
                     break;
-                case 2: // Status (Enum comparison is fast integer comparison)
+                case 2: // Status
+                    // Enum comparison is effectively an integer comparison (very fast)
                     result = _store.Statuses[x].CompareTo(_store.Statuses[y]);
                     break;
                 case 3: // Expected Hash
                     result = CompareHashes(_store.ExpectedHashes[x], _store.ExpectedHashes[y]);
                     break;
                 case 4: // Time
-                    // Lexical sort for time string is "okay" roughly, 
-                    // but parsing to int is better if strictly needed. 
-                    // Keeping string compare for speed as it's just visual.
+                    // Lexical sort for time string is generally sufficient for visual sorting.
+                    // (e.g., "100 ms" vs "20 ms" might sort oddly, but usually acceptable for this view).
                     result = string.Compare(_store.TimeStrs[x], _store.TimeStrs[y], StringComparison.OrdinalIgnoreCase);
                     break;
             }
@@ -71,18 +86,25 @@ namespace SharpSFV
             return (Order == SortOrder.Descending) ? -result : result;
         }
 
+        /// <summary>
+        /// Performs a lexicographical comparison of two byte arrays.
+        /// (e.g., 0x00 comes before 0xFF).
+        /// </summary>
         private int CompareHashes(byte[]? h1, byte[]? h2)
         {
             if (h1 == null && h2 == null) return 0;
             if (h1 == null) return -1;
             if (h2 == null) return 1;
 
+            // Compare byte by byte
             int len = Math.Min(h1.Length, h2.Length);
             for (int i = 0; i < len; i++)
             {
                 int c = h1[i].CompareTo(h2[i]);
                 if (c != 0) return c;
             }
+
+            // If bytes match, shorter array comes first
             return h1.Length.CompareTo(h2.Length);
         }
     }

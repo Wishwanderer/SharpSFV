@@ -16,6 +16,18 @@ using System.IO;
 
 namespace SharpSFV
 {
+    /// <summary>
+    /// The Main Form Entry Point & State Manager.
+    /// <para>
+    /// <b>Architecture Note:</b> This class is split into multiple partial files to separate concerns:
+    /// <list type="bullet">
+    /// <item><b>Form1.cs:</b> Lifecycle, State, IPC, and Entry.</item>
+    /// <item><b>Form1.Processing.cs:</b> The Hashing Engine (Producer/Consumer).</item>
+    /// <item><b>Form1.UI.*.cs:</b> Layout, VirtualMode rendering, and Menu logic.</item>
+    /// <item><b>Form1.Actions.cs:</b> User command handlers.</item>
+    /// </list>
+    /// </para>
+    /// </summary>
     public partial class Form1 : Form
     {
         #region Fields & State
@@ -23,70 +35,77 @@ namespace SharpSFV
         private AppSettings _settings;
         private bool _skipSaveOnClose = false;
 
-        // UI Throttling
+        // UI Throttling: Used by Interlocked.CompareExchange to drop UI frames if the main thread is busy.
         private int _uiBusy = 0;
 
         // PAUSE / RESUME LOGIC
+        // ManualResetEventSlim is lighter than AutoResetEvent and suitable for high-freq checks in the worker loop.
         private ManualResetEventSlim _pauseEvent = new ManualResetEventSlim(true);
         private bool _isPaused = false;
 
-        // Standard File Store (SoA)
+        // Standard File Store (Structure of Arrays) - Primary Data Source for Standard Mode
         private FileStore _fileStore = new FileStore();
 
-        // Job Store (SoA)
+        // Job Store (Structure of Arrays) - Primary Data Source for Job Mode
         private JobStore _jobStore = new JobStore();
         private bool _isJobMode = false;
         private bool _isJobQueueRunning = false;
 
-        // Holds indices pointing to _fileStore for the Virtual ListView
+        // Indirection Layer:
+        // Contains indices pointing to _fileStore. 
+        // Allows sorting/filtering the View without shuffling the actual heavy data arrays.
         private List<int> _displayIndices = new List<int>();
 
-        // Sorter
+        // Sorter implementation for the Virtual List
         private FileListSorter _listSorter;
 
-        // UI Constraints
+        // UI Constraints & Cache
         private Dictionary<int, int> _originalColWidths = new Dictionary<int, int>();
         private int _cachedFullPathWidth = 400;
         private int _cachedFileNameWidth = 300;
 
-        // State Flags
+        // Application State Flags
         private bool _isProcessing = false;
         private bool _isVerificationMode = false;
         private HashType _currentHashType = HashType.XXHASH3;
         private CancellationTokenSource? _cts;
-        private volatile bool _legacySfvDetected = false; // Track endian issues
 
-        // Headless Mode Flag
+        // Volatile flag: Accessed by worker threads to signal Endian mismatch (legacy SFV)
+        private volatile bool _legacySfvDetected = false;
+
+        // Headless Mode Flag (CLI execution hidden from user)
         private bool _isHeadless = false;
         private string[] _startupArgs;
 
-        // Taskbar Progress
+        // Taskbar Progress (Green/Red progress in Windows Taskbar) via COM
         private ITaskbarList3? _taskbarList;
 
-        // Context Menu Create Mode (IPC)
+        // Context Menu Create Mode (IPC State)
+        // When Right-Click -> "Create Checksum" is used, Explorer may spawn multiple instances.
+        // We use a Pipe Server to collect paths from secondary instances into this one.
         private bool _isCreateMode = false;
         private List<string> _collectedPaths = new List<string>();
         private System.Windows.Forms.Timer? _debounceTimer;
         private string? _autoSavePath;
 
-        // Threading & UI Throttling
+        // Threading & UI Throttling Helpers
         private object _uiLock = new object();
         private long _lastUiUpdateTick = 0;
 
-        // GDI Cache
+        // GDI Cache (Disposed in FormClosing)
         private Font _fontBold;
         private Font _fontStrike;
 
-        // Dynamic UI Controls
+        // Dynamic UI Controls (Built in code, not Designer)
         private MenuStrip? _menuStrip;
         private ContextMenuStrip? _ctxMenu;
 
-        // Layout Controls
+        // Layout Containers
         private SplitContainer? _mainSplitter;
         private Panel? _statsPanel;
         private Panel? _filterPanel;
 
-        // Comments Panel
+        // Comments Panel (SFV Headers)
         private Panel? _commentsPanel;
         private TextBox? _txtComments;
 
@@ -97,7 +116,7 @@ namespace SharpSFV
         private TextBox? _txtExclude;
         private CheckBox? _chkRecursive;
 
-        // Stats Controls
+        // Stats & Metrics Labels
         private Label? _lblProgress;
         private Label? _lblTotalTime;
         private Label? _lblLegacyWarning;
@@ -110,7 +129,7 @@ namespace SharpSFV
         private Button? _btnStop;
         private Button? _btnPause;
 
-        // Active Jobs Controls
+        // Active Jobs Controls (The bottom panel showing currently hashing files)
         private ListView? _lvActiveJobs;
 
         // Filter Controls
@@ -119,7 +138,7 @@ namespace SharpSFV
         private CheckBox? _chkShowDuplicates;
         private System.Threading.Timer? _filterDebounceTimer;
 
-        // Menu References
+        // Menu References (For enabling/disabling state)
         private ToolStripMenuItem? _menuViewTime;
         private ToolStripMenuItem? _menuViewShowFullPaths;
         private ToolStripMenuItem? _menuOptionsFilter;
@@ -159,20 +178,24 @@ namespace SharpSFV
             InitializeComponent();
             _startupArgs = args;
 
-            // Create Mode (Shell Integration)
+            // --- CREATE MODE (Shell Integration) ---
+            // If "-create" is passed, this instance becomes the Named Pipe Server.
+            // It waits for other instances (triggered by selecting multiple files in Explorer) 
+            // to send their paths before launching the UI.
             if (args.Contains("-create", StringComparer.OrdinalIgnoreCase))
             {
                 _isCreateMode = true;
-                this.Opacity = 0;
+                this.Opacity = 0; // Hide until paths are collected
                 this.ShowInTaskbar = false;
                 this.WindowState = FormWindowState.Normal;
 
+                // Debounce Timer: Wait 200ms after the LAST path is received before starting.
                 _debounceTimer = new System.Windows.Forms.Timer { Interval = 200 };
                 _debounceTimer.Tick += OnDebounceTick;
 
                 StartPipeServer();
             }
-            // Check Headless Mode
+            // --- HEADLESS MODE (CLI) ---
             else if (args.Contains("-headless", StringComparer.OrdinalIgnoreCase))
             {
                 _isHeadless = true;
@@ -181,6 +204,7 @@ namespace SharpSFV
                 this.WindowState = FormWindowState.Minimized;
             }
 
+            // Set Icon from Resource
             try
             {
                 var assembly = System.Reflection.Assembly.GetExecutingAssembly();
@@ -194,6 +218,7 @@ namespace SharpSFV
             _settings = new AppSettings(Application.ExecutablePath);
             _settings.Load();
 
+            // Initialize Taskbar Progress (COM)
             if (!_isHeadless && !_isCreateMode)
             {
                 try
@@ -211,18 +236,21 @@ namespace SharpSFV
 
             _listSorter = new FileListSorter(_fileStore);
 
+            // Initialize GDI resources
             _fontBold = new Font(this.Font, FontStyle.Bold);
             _fontStrike = new Font(this.Font, FontStyle.Strikeout);
 
+            // Configure Virtual ListView
             this.lvFiles.VirtualMode = true;
             this.lvFiles.RetrieveVirtualItem += LvFiles_RetrieveVirtualItem;
             this.lvFiles.Scrollable = true;
-            EnableDoubleBuffer(this.lvFiles);
+            EnableDoubleBuffer(this.lvFiles); // Prevent flickering
 
             this.lvFiles.ColumnClick += LvFiles_ColumnClick;
             this.FormClosing += Form1_FormClosing;
             this.Shown += Form1_Shown;
 
+            // Initialize UI Components
             SetupLayout();
             SetupContextMenu();
             SetupDragDrop();
@@ -232,6 +260,10 @@ namespace SharpSFV
             SetAlgorithm(_currentHashType);
         }
 
+        /// <summary>
+        /// Starts an async Named Pipe Server to listen for paths from secondary instances.
+        /// Used during Context Menu "Create Checksum" operations with multiple file selections.
+        /// </summary>
         private async void StartPipeServer()
         {
             while (!_isProcessing && _isCreateMode)
@@ -248,6 +280,7 @@ namespace SharpSFV
                             {
                                 if (!string.IsNullOrWhiteSpace(line) && !line.StartsWith("-"))
                                 {
+                                    // Marshall back to UI thread to add path and reset debounce timer
                                     this.Invoke(new Action(() => {
                                         _collectedPaths.Add(line);
                                         _debounceTimer?.Stop();
@@ -262,12 +295,20 @@ namespace SharpSFV
             }
         }
 
+        /// <summary>
+        /// Triggered when no new paths have been received via pipe for 200ms.
+        /// Launches the Mini UI.
+        /// </summary>
         private void OnDebounceTick(object? sender, EventArgs e)
         {
             _debounceTimer?.Stop();
             LaunchCreateMode();
         }
 
+        /// <summary>
+        /// Configures the "Mini Mode" UI for instant hash creation.
+        /// Prompts for Save Location, sets up the compact layout, and starts processing.
+        /// </summary>
         private void LaunchCreateMode()
         {
             if (_collectedPaths.Count == 0)
@@ -276,6 +317,7 @@ namespace SharpSFV
                 return;
             }
 
+            // Determine sensible default directory for Save Dialog
             string baseDir = "";
             if (_collectedPaths.Count == 1 && Directory.Exists(_collectedPaths[0])) baseDir = _collectedPaths[0];
             else if (_collectedPaths.Count == 1) baseDir = Path.GetDirectoryName(_collectedPaths[0]) ?? "";
@@ -309,6 +351,7 @@ namespace SharpSFV
 
             SetupMiniLayout();
 
+            // Detect algo from chosen extension
             string ext = Path.GetExtension(_autoSavePath).ToLower();
             if (ext == ".md5") _currentHashType = HashType.MD5;
             else if (ext == ".sha1") _currentHashType = HashType.SHA1;
@@ -316,6 +359,7 @@ namespace SharpSFV
             else if (ext == ".xxh3") _currentHashType = HashType.XXHASH3;
             else _currentHashType = HashType.Crc32;
 
+            // Remember choice
             _settings.DefaultAlgo = _currentHashType;
             _settings.Save(this, false, _currentHashType, -1, null!);
 
@@ -323,6 +367,7 @@ namespace SharpSFV
             this.ShowInTaskbar = true;
             this.CenterToScreen();
 
+            // Re-init taskbar for this visible window
             try
             {
                 if (_taskbarList == null)
@@ -341,6 +386,9 @@ namespace SharpSFV
             _ = RunHashCreation(_collectedPaths.ToArray(), baseDir);
         }
 
+        /// <summary>
+        /// Reflection hack to enable Double Buffering on the ListView, preventing flicker during rapid updates.
+        /// </summary>
         private void EnableDoubleBuffer(Control control)
         {
             typeof(Control).InvokeMember("DoubleBuffered",
@@ -352,8 +400,10 @@ namespace SharpSFV
         {
             if (_isCreateMode) return;
 
+            // Yield to allow UI to paint first
             await Task.Delay(100);
 
+            // Process any startup arguments that are file paths
             var pathsToProcess = _startupArgs.Where(a => !a.StartsWith("-")).ToArray();
 
             if (pathsToProcess.Length > 0)
@@ -364,12 +414,14 @@ namespace SharpSFV
 
         private void Form1_FormClosing(object? sender, FormClosingEventArgs e)
         {
+            // Cleanup Background Tasks
             _cts?.Cancel();
             _pauseEvent?.Dispose();
             _debounceTimer?.Dispose();
 
             if (_skipSaveOnClose || _isHeadless || _isCreateMode) return;
 
+            // Persist Settings
             bool timeEnabled = _menuViewTime?.Checked ?? false;
             _settings.ShowFullPaths = _menuViewShowFullPaths?.Checked ?? false;
             _settings.ShowFilterPanel = _menuOptionsFilter?.Checked ?? false;
@@ -390,10 +442,12 @@ namespace SharpSFV
 
             _settings.Save(this, timeEnabled, _currentHashType, distToSave, lvFiles);
 
+            // Dispose GDI
             _fontBold?.Dispose();
             _fontStrike?.Dispose();
             _filterDebounceTimer?.Dispose();
 
+            // Clear Pooled Strings to free heap
             StringPool.Clear();
         }
 
@@ -403,10 +457,15 @@ namespace SharpSFV
             Win32Storage.SetProgressBarState(progressBarTotal, state);
         }
 
+        /// <summary>
+        /// Central method triggered when the Hashing Engine finishes.
+        /// Updates UI final state, plays sounds, and writes results (if auto-save active).
+        /// </summary>
         private void HandleCompletion(int completed, int ok, int bad, int missing, Stopwatch sw, bool verifyMode = false)
         {
             bool isCancelled = _cts?.Token.IsCancellationRequested ?? false;
 
+            // Audio Feedback
             if (!isCancelled && !_isHeadless)
             {
                 if (bad > 0 || (missing > 0 && verifyMode)) SystemSounds.Exclamation.Play();
@@ -415,6 +474,7 @@ namespace SharpSFV
 
             SetProcessingState(false);
 
+            // Headless Report
             if (_isHeadless)
             {
                 Console.WriteLine();
@@ -429,6 +489,7 @@ namespace SharpSFV
                 return;
             }
 
+            // GUI Update (Marshall to UI Thread)
             this.Invoke(new Action(() =>
             {
                 RecalculateColumnWidths();
@@ -440,12 +501,14 @@ namespace SharpSFV
                     progressBarTotal.Maximum = safeTotal;
                     progressBarTotal.Value = Math.Min(completed, safeTotal);
 
+                    // Set Progress Bar Color (Green = Normal, Red = Error, Yellow = Pause/Cancel)
                     int pbState = Win32Storage.PBST_NORMAL;
                     if (bad > 0 || missing > 0) pbState = Win32Storage.PBST_ERROR;
                     else if (isCancelled) pbState = Win32Storage.PBST_PAUSED;
 
                     SetProgressBarColor(pbState);
 
+                    // Sync Taskbar State
                     if (_taskbarList != null)
                     {
                         try
@@ -460,6 +523,7 @@ namespace SharpSFV
                     }
                 }
 
+                // Update Window Title
                 if (verifyMode)
                 {
                     string algoName = Enum.GetName(typeof(HashType), _currentHashType) ?? "Hash";
@@ -471,6 +535,7 @@ namespace SharpSFV
                 {
                     this.Text = $"SharpSFV - Creation Complete [{_currentHashType}]";
 
+                    // Mini Mode Auto-Save
                     if (_isCreateMode && !string.IsNullOrEmpty(_autoSavePath) && !isCancelled)
                     {
                         SaveResultsToFile(_autoSavePath);
@@ -509,9 +574,12 @@ namespace SharpSFV
                     {
                         if (_fileStore.IsSummaryRows[i]) continue;
                         string hash = _fileStore.GetCalculatedHashString(i);
+
+                        // Only save valid, non-pending hashes
                         if (!hash.Contains("...") && !string.IsNullOrEmpty(hash))
                         {
                             string fullPath = _fileStore.GetFullPath(i);
+                            // Store relative path (filename only in Create Mode generally)
                             string relPath = _fileStore.RelativePaths[i] ?? Path.GetFileName(fullPath);
                             sw.WriteLine($"{hash} *{relPath}");
                         }

@@ -12,6 +12,16 @@ namespace SharpSFV
 {
     public partial class Form1
     {
+        /// <summary>
+        /// The Virtual Mode Renderer.
+        /// <para>
+        /// <b>Architecture:</b>
+        /// WinForms <see cref="ListView"/> in Virtual Mode does not store data. 
+        /// It requests data on-demand via the <see cref="RetrieveVirtualItem"/> event.
+        /// This method acts as the translation layer between the raw SoA data (<see cref="FileStore"/>)
+        /// and the Visual Elements (<see cref="ListViewItem"/>).
+        /// </para>
+        /// </summary>
         private void LvFiles_RetrieveVirtualItem(object? sender, RetrieveVirtualItemEventArgs e)
         {
             try
@@ -19,7 +29,8 @@ namespace SharpSFV
                 if (_isJobMode)
                 {
                     // --- JOB MODE RENDER ---
-                    // Safety check: If index is out of bounds, return a placeholder instead of null (which causes the crash)
+                    // Direct mapping: index -> JobStore arrays.
+                    // Safety check: Return placeholder if index is out of bounds (race condition safety).
                     if (e.ItemIndex < 0 || e.ItemIndex >= _jobStore.Count)
                     {
                         e.Item = new ListViewItem("Loading...");
@@ -59,7 +70,7 @@ namespace SharpSFV
                     // Column 4: Time
                     item.SubItems.Add(_jobStore.TimeStrs[idx]);
 
-                    // Colors
+                    // Conditional Formatting (Color Coding)
                     switch (status)
                     {
                         case JobStatus.Done:
@@ -84,7 +95,8 @@ namespace SharpSFV
                 else
                 {
                     // --- STANDARD MODE RENDER ---
-                    // Safety check
+                    // Indirection mapping: View Index -> Display List -> Store Index.
+                    // This allows sorting/filtering without modifying the underlying FileStore.
                     if (e.ItemIndex < 0 || e.ItemIndex >= _displayIndices.Count)
                     {
                         e.Item = new ListViewItem("Loading...");
@@ -99,6 +111,7 @@ namespace SharpSFV
 
                     var item = new ListViewItem(displayName);
 
+                    // Conditionally add sub-items based on View settings to avoid overhead
                     if (_settings.ShowHashCol)
                         item.SubItems.Add(_fileStore.GetCalculatedHashString(storeIdx));
 
@@ -111,6 +124,7 @@ namespace SharpSFV
                     if (_settings.ShowTimeTab)
                         item.SubItems.Add(_fileStore.TimeStrs[storeIdx]);
 
+                    // Visual Feedback Logic
                     if (status == ItemStatus.Error || status == ItemStatus.Bad)
                     {
                         item.ForeColor = ColRedText;
@@ -139,13 +153,17 @@ namespace SharpSFV
             }
             catch
             {
-                // Absolute fallback to prevent app crash
+                // Absolute fallback to prevent app crash during high-speed updates
                 e.Item = new ListViewItem("Error");
             }
         }
 
+        /// <summary>
+        /// Handles column header clicks to trigger sorting.
+        /// </summary>
         private void LvFiles_ColumnClick(object? sender, ColumnClickEventArgs e)
         {
+            // Disable sorting while active to prevent index misalignment
             if (_isProcessing || _isJobMode) return;
 
             if (e.Column != _listSorter.SortColumn)
@@ -161,13 +179,13 @@ namespace SharpSFV
             UpdateSortVisuals(e.Column, _listSorter.Order);
             Cursor = Cursors.WaitCursor;
 
-            // Removed Task.Run. 
-            // Sorting List<int> (even 500k items) is extremely fast (<100ms) and should be done on UI thread 
-            // to avoid race conditions with RetrieveVirtualItem which reads this list simultaneously.
+            // Optimization:
+            // Sorting List<int> of pointers is extremely fast (even for 500k items, <100ms).
+            // Done on UI thread to ensure atomicity with RetrieveVirtualItem.
             try
             {
                 _displayIndices.Sort(_listSorter);
-                lvFiles.Invalidate();
+                lvFiles.Invalidate(); // Trigger repaint
             }
             finally
             {
@@ -179,14 +197,20 @@ namespace SharpSFV
         {
             foreach (ColumnHeader ch in lvFiles.Columns)
             {
+                // Strip existing arrows
                 if (ch.Text.EndsWith(" ▲") || ch.Text.EndsWith(" ▼"))
                     ch.Text = ch.Text.Substring(0, ch.Text.Length - 2);
 
+                // Add arrow to current column
                 if (ch.Index == column)
                     ch.Text += (order == SortOrder.Ascending) ? " ▲" : " ▼";
             }
         }
 
+        /// <summary>
+        /// Synchronizes the VirtualListSize with the underlying data count.
+        /// Uses <see cref="Win32Storage.SuspendDrawing"/> to prevent flickering during the update.
+        /// </summary>
         private void UpdateDisplayList()
         {
             Win32Storage.SuspendDrawing(lvFiles);
@@ -207,11 +231,19 @@ namespace SharpSFV
             finally { Win32Storage.ResumeDrawing(lvFiles); }
         }
 
+        /// <summary>
+        /// Timer callback for the Filter input.
+        /// Prevents filtering from running on every keystroke, which would freeze the UI on large datasets.
+        /// </summary>
         private void OnFilterDebounce(object? state)
         {
             this.Invoke(new Action(() => ApplyFilter()));
         }
 
+        /// <summary>
+        /// Applies the text filter and status filter to the <see cref="_displayIndices"/>.
+        /// Runs on a background thread to avoid blocking the UI, then marshals the result back.
+        /// </summary>
         private void ApplyFilter()
         {
             if (_isJobMode) return;
@@ -227,18 +259,21 @@ namespace SharpSFV
 
                 if (showDuplicates)
                 {
+                    // 1. Duplicate Detection Logic
                     var validIndices = new List<int>();
                     for (int i = 0; i < _fileStore.Count; i++)
                     {
                         if (_fileStore.CalculatedHashes[i] != null) validIndices.Add(i);
                     }
 
+                    // Group by Hash String
                     var groups = validIndices.GroupBy(i => _fileStore.GetCalculatedHashString(i));
                     foreach (var grp in groups)
                     {
                         if (grp.Count() > 1) filteredIndices.AddRange(grp);
                     }
 
+                    // Sort duplicates by hash for easier viewing
                     filteredIndices.Sort((a, b) =>
                         string.Compare(_fileStore.GetCalculatedHashString(a),
                                      _fileStore.GetCalculatedHashString(b),
@@ -246,6 +281,7 @@ namespace SharpSFV
                 }
                 else
                 {
+                    // 2. Standard Search/Status Filtering
                     for (int i = 0; i < _fileStore.Count; i++)
                     {
                         string? name = _fileStore.FileNames[i];
@@ -265,13 +301,16 @@ namespace SharpSFV
                         if (matchName && matchStatus) filteredIndices.Add(i);
                     }
 
+                    // Re-apply sort order if active
                     if (_listSorter.SortColumn != -1) filteredIndices.Sort(_listSorter);
                 }
 
+                // UI Update
                 this.Invoke(new Action(() =>
                 {
                     _displayIndices = filteredIndices;
 
+                    // Enable/Disable Duplicate Tools
                     if (_menuGenCopyDups != null) _menuGenCopyDups.Enabled = showDuplicates && filteredIndices.Count > 0;
                     if (_menuGenDelDups != null) _menuGenDelDups.Enabled = showDuplicates && filteredIndices.Count > 0;
 
@@ -280,6 +319,9 @@ namespace SharpSFV
             });
         }
 
+        /// <summary>
+        /// Limits column resizing to reasonable bounds to prevent the UI from looking broken.
+        /// </summary>
         private void LvFiles_ColumnWidthChanging(object? sender, ColumnWidthChangingEventArgs e)
         {
             int orig = 0;
@@ -300,6 +342,7 @@ namespace SharpSFV
             int min = (int)(orig * 0.75);
             int max = (int)(orig * 1.5);
 
+            // Special handling for the Name column which can expand significantly
             int nameColIndex = -1;
             foreach (ColumnHeader ch in lvFiles.Columns)
             {
