@@ -327,7 +327,7 @@ namespace SharpSFV
             {
                 sfd.Title = "SharpSFV - Create Checksum";
                 sfd.InitialDirectory = baseDir;
-                sfd.FileName = "checksum";
+                sfd.FileName = "checksums";
                 sfd.Filter = "SFV File (*.sfv)|*.sfv|MD5 File (*.md5)|*.md5|SHA1 File (*.sha1)|*.sha1|SHA256 File (*.sha256)|*.sha256|xxHash3 (*.xxh3)|*.xxh3";
 
                 sfd.FilterIndex = _settings.DefaultAlgo switch
