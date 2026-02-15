@@ -1,4 +1,5 @@
 using SharpSFV.Interop;
+using SharpSFV.Utils;
 using System;
 using System.IO;
 using System.IO.Pipes;
@@ -9,26 +10,32 @@ using System.Windows.Forms;
 
 namespace SharpSFV
 {
+    /// <summary>
+    /// The main entry point for the application.
+    /// <para>
+    /// <b>Responsibilities:</b>
+    /// 1. <b>Self-Installation:</b> Checks if the app is running from <c>%LOCALAPPDATA%</c>. If not, installs itself there.
+    /// 2. <b>Single Instance Logic:</b> Uses a <see cref="Mutex"/> to prevent multiple "Create" windows.
+    /// 3. <b>IPC:</b> Uses Named Pipes to forward arguments from secondary instances to the primary instance.
+    /// 4. <b>Headless Mode:</b> Attaches to the parent console for CLI output.
+    /// </para>
+    /// </summary>
     internal static class Program
     {
         // Unique ID for the Mutex. Global to the operating system session.
         private const string MutexName = "SharpSFV_Instance_Mutex";
         private const string PipeName = "SharpSFV_Pipe";
 
-        /// <summary>
-        /// The main entry point for the application.
-        /// <para>
-        /// <b>Logic Flow:</b>
-        /// 1. Checks for <c>-create</c> argument (Context Menu mode).
-        /// 2. If present, attempts to acquire a global <see cref="Mutex"/>.
-        /// 3. If Mutex is already owned by another process, this is a secondary instance.
-        ///    It sends its arguments to the primary instance via Named Pipe and exits.
-        /// 4. If Mutex is acquired (or not in create mode), it launches the GUI.
-        /// </para>
-        /// </summary>
         [STAThread]
         static void Main(string[] args)
         {
+            // --- NEW: Self-Centralization Logic ---
+            // Before doing anything else, check if we should install/update 
+            // the central copy in %LOCALAPPDATA%\SharpSFV and add it to PATH.
+            // This allows future scripts to just call "SharpSFV" without a full path.
+            SelfInstaller.EnsureCentralizedInstall();
+            // --------------------------------------
+
             bool isCreateMode = args.Contains("-create", StringComparer.OrdinalIgnoreCase);
             Mutex? mutex = null;
 
@@ -43,7 +50,7 @@ namespace SharpSFV
                     if (!createdNew)
                     {
                         // Mutex exists -> Another instance is already running.
-                        // Forward our arguments (file paths) to that instance and close.
+                        // Forward our arguments (file paths) to that instance via Named Pipe and close.
                         SendArgsToPrimaryInstance(args);
                         return;
                     }

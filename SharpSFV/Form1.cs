@@ -189,6 +189,14 @@ namespace SharpSFV
                 this.ShowInTaskbar = false;
                 this.WindowState = FormWindowState.Normal;
 
+                foreach (var arg in args)
+                {
+                    if (!string.IsNullOrWhiteSpace(arg) && !arg.StartsWith("-"))
+                    {
+                        _collectedPaths.Add(arg);
+                    }
+                }
+
                 // Debounce Timer: Wait 200ms after the LAST path is received before starting.
                 _debounceTimer = new System.Windows.Forms.Timer { Interval = 200 };
                 _debounceTimer.Tick += OnDebounceTick;
@@ -327,7 +335,7 @@ namespace SharpSFV
             {
                 sfd.Title = "SharpSFV - Create Checksum";
                 sfd.InitialDirectory = baseDir;
-                sfd.FileName = "checksums";
+                sfd.FileName = "checksum";
                 sfd.Filter = "SFV File (*.sfv)|*.sfv|MD5 File (*.md5)|*.md5|SHA1 File (*.sha1)|*.sha1|SHA256 File (*.sha256)|*.sha256|xxHash3 (*.xxh3)|*.xxh3";
 
                 sfd.FilterIndex = _settings.DefaultAlgo switch
