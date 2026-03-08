@@ -37,6 +37,7 @@ namespace SharpSFV
                 {
                     key.SetValue("", "SharpSFV: Create Checksum");
                     key.SetValue("Icon", exePath);
+                    key.SetValue("MultiSelectModel", "Player");
                     using (var cmd = key.CreateSubKey("command")) cmd.SetValue("", createCommand);
                 }
 
@@ -45,6 +46,7 @@ namespace SharpSFV
                 {
                     key.SetValue("", "SharpSFV: Create Checksum");
                     key.SetValue("Icon", exePath);
+                    key.SetValue("MultiSelectModel", "Player");
                     using (var cmd = key.CreateSubKey("command")) cmd.SetValue("", createCommand);
                 }
 
@@ -820,7 +822,7 @@ namespace SharpSFV
 
             Label lbl = new Label
             {
-                Text = "SharpSFV v2.63\nInspired by QuickSFV\n\nCreated by L33T",
+                Text = "SharpSFV v2.7\nInspired by QuickSFV\n\nCreated by L33T.",
                 AutoSize = false,
                 TextAlign = ContentAlignment.MiddleCenter,
                 Dock = DockStyle.Top,

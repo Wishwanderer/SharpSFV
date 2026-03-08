@@ -91,6 +91,51 @@ namespace SharpSFV
             HandleCompletion(completed, completed, 0, 0, globalSw);
         }
 
+        /// <summary>
+        /// Pre-scans directories to get an exact file count before processing starts.
+        /// This ensures the Job Mode progress percentage is perfectly accurate and smooth.
+        /// </summary>
+        private async Task<int> CountFilesAsync(string[] paths, bool recursive)
+        {
+            return await Task.Run(() =>
+            {
+                int count = 0;
+                var opts = new EnumerationOptions
+                {
+                    IgnoreInaccessible = true,
+                    RecurseSubdirectories = recursive,
+                    AttributesToSkip = FileAttributes.ReparsePoint | FileAttributes.Hidden | FileAttributes.System
+                };
+
+                // Ensure we respect the user's advanced include/exclude filters
+                bool CheckFilter(string fullPath)
+                {
+                    if (!_settings.ShowAdvancedBar) return true;
+                    return IsFileAllowed(Path.GetFileName(fullPath));
+                }
+
+                foreach (string path in paths)
+                {
+                    if (File.Exists(path))
+                    {
+                        if (CheckFilter(path)) count++;
+                    }
+                    else if (Directory.Exists(path))
+                    {
+                        try
+                        {
+                            foreach (var file in Directory.EnumerateFiles(path, "*", opts))
+                            {
+                                if (CheckFilter(file)) count++;
+                            }
+                        }
+                        catch { }
+                    }
+                }
+                return count;
+            });
+        }
+
         // --- JOB QUEUE PROCESSOR ---
 
         /// <summary>
@@ -126,7 +171,8 @@ namespace SharpSFV
 
                     if (!_isProcessing) SetProcessingState(true);
 
-                    _jobStore.UpdateStatus(currentJobIdx, JobStatus.InProgress);
+                    // --- SCANNING PHASE ---
+                    _jobStore.UpdateStatus(currentJobIdx, JobStatus.Scanning);
 
                     if (!_isHeadless)
                     {
@@ -137,13 +183,22 @@ namespace SharpSFV
                     }
                     else
                     {
-                        Console.WriteLine($"Starting Job: {_jobStore.Names[currentJobIdx]}");
+                        Console.WriteLine($"Scanning Job: {_jobStore.Names[currentJobIdx]}");
                     }
 
                     string[] inputs = _jobStore.InputPaths[currentJobIdx];
                     string rootPath = _jobStore.RootPaths[currentJobIdx];
                     int jobId = _jobStore.Ids[currentJobIdx];
                     string jobName = _jobStore.Names[currentJobIdx];
+
+                    // Perform the fast pre-scan to lock in the denominator
+                    bool recursive = (_isCreateMode || _settings.ShowAdvancedBar) ? _settings.ScanRecursive : true;
+                    int exactTotal = await CountFilesAsync(inputs, recursive);
+
+                    // Now transition to actual processing
+                    _jobStore.UpdateStatus(currentJobIdx, JobStatus.InProgress);
+                    if (!_isHeadless) this.BeginInvoke(new Action(() => lvFiles.Invalidate()));
+                    // ---------------------------
 
                     // Reset Job Metrics
                     _totalBytesDetected = 0;
@@ -170,16 +225,32 @@ namespace SharpSFV
                     _fileStore.Clear();
                     _displayIndices.Clear();
 
+                    long lastJobProgressTick = Environment.TickCount64;
+
                     // Run Engine
-                    await ExecuteHashingEngine(inputs, rootPath, isHDD, false, (curr, total, ok, bad) =>
+                    await ExecuteHashingEngine(inputs, rootPath, isHDD, false, (curr, dynamicTotal, ok, bad) =>
                     {
-                        if (total > 0)
+                        if (exactTotal > 0)
                         {
-                            double pct = (double)curr / total * 100.0;
+                            // Use exactTotal instead of dynamicTotal for smooth percentages
+                            double pct = (double)curr / exactTotal * 100.0;
+                            if (pct > 100.0) pct = 100.0; // Safety clamp
                             _jobStore.UpdateProgress(currentJobIdx, pct);
                         }
 
-                        ThrottledUiUpdate(curr, total, ok, 0, bad);
+                        // Throttle ListView Repaints to 250ms (or when done) to avoid freezing UI
+                        long now = Environment.TickCount64;
+                        if (now - lastJobProgressTick >= 250 || curr == exactTotal)
+                        {
+                            lastJobProgressTick = now;
+                            if (!_isHeadless)
+                            {
+                                this.BeginInvoke(new Action(() => lvFiles.Invalidate()));
+                            }
+                        }
+
+                        // Pass exactTotal to the global progress bar
+                        ThrottledUiUpdate(curr, exactTotal, ok, 0, bad);
                     });
 
                     // Save Result
@@ -382,6 +453,8 @@ namespace SharpSFV
                     long lastBatchTime = DateTime.UtcNow.Ticks;
                     string pooledBase = StringPool.GetOrAdd(baseDirectory);
 
+                    var processedPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
                     // Local function to flush discovered files to UI in batches (prevents UI freeze)
                     void FlushUiBatch()
                     {
@@ -413,7 +486,7 @@ namespace SharpSFV
                         if (File.Exists(path))
                         {
                             try { Interlocked.Add(ref _totalBytesDetected, new FileInfo(path).Length); } catch { }
-                            await ProcessFileEntry(path, pooledBase, originalIndex++, channel.Writer, uiBatch);
+                            await ProcessFileEntry(path, pooledBase, originalIndex++, channel.Writer, uiBatch, processedPaths);
                         }
                         else if (Directory.Exists(path))
                         {
@@ -434,7 +507,7 @@ namespace SharpSFV
 
                                     try { Interlocked.Add(ref _totalBytesDetected, new FileInfo(file).Length); } catch { }
 
-                                    await ProcessFileEntry(file, pooledBase, originalIndex++, channel.Writer, uiBatch);
+                                    await ProcessFileEntry(file, pooledBase, originalIndex++, channel.Writer, uiBatch, processedPaths);
 
                                     Interlocked.Exchange(ref totalFilesDiscovered, originalIndex);
 

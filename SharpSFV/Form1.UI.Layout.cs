@@ -87,6 +87,7 @@ namespace SharpSFV
             // Ensure necessary controls exist
             if (_statsPanel == null) SetupStatsPanel();
             if (progressBarTotal == null) progressBarTotal = new ProgressBar();
+            if (_progressBarFile == null) _progressBarFile = new ProgressBar();
 
             this.Controls.Clear();
             this.FormBorderStyle = FormBorderStyle.FixedDialog;
@@ -136,19 +137,29 @@ namespace SharpSFV
                 this.Controls.Add(_btnPause);
             }
 
-            // 3. Progress Bar (Fills remaining space to the left)
+            // 3. Progress Bars (Fills remaining space to the left, stacked vertically)
+            int pBarWidth = pauseX - spacing - marginX;
+
             if (progressBarTotal != null)
             {
                 progressBarTotal.Parent = this;
                 progressBarTotal.Dock = DockStyle.None;
-
-                int pBarWidth = pauseX - spacing - marginX;
-
                 progressBarTotal.Location = new Point(marginX, yPos);
-                progressBarTotal.Size = new Size(pBarWidth, btnHeight); // Same height as buttons
+                progressBarTotal.Size = new Size(pBarWidth, 12);
                 progressBarTotal.Visible = true;
                 progressBarTotal.BringToFront();
                 this.Controls.Add(progressBarTotal);
+            }
+
+            if (_progressBarFile != null)
+            {
+                _progressBarFile.Parent = this;
+                _progressBarFile.Dock = DockStyle.None;
+                _progressBarFile.Location = new Point(marginX, yPos + 14);
+                _progressBarFile.Size = new Size(pBarWidth, 12);
+                _progressBarFile.Visible = true;
+                _progressBarFile.BringToFront();
+                this.Controls.Add(_progressBarFile);
             }
         }
 
@@ -728,7 +739,7 @@ namespace SharpSFV
                 }
                 else
                 {
-                    this.Text = $"SharpSFV [{_currentHashType}]";
+                    this.Text = $"SharpSFV[{_currentHashType}]";
                 }
             }
         }

@@ -32,8 +32,12 @@ namespace SharpSFV
         /// <param name="originalIndex">The sequential index of discovery (for sorting).</param>
         /// <param name="writer">The channel writer to push the work item to.</param>
         /// <param name="uiBatch">A buffer list of indices to update the UI in batches.</param>
-        private async Task ProcessFileEntry(string fullPath, string baseDir, int originalIndex, ChannelWriter<FileJob> writer, List<int> uiBatch)
+        /// <param name="processedPaths">A hashset to track and skip already-processed paths (prevents duplicates).</param>
+        private async Task ProcessFileEntry(string fullPath, string baseDir, int originalIndex, ChannelWriter<FileJob> writer, List<int> uiBatch, HashSet<string> processedPaths)
         {
+            // Prevent duplicate processing if paths overlap (e.g., folder + internal file selected together)
+            if (!processedPaths.Add(fullPath)) return;
+
             // 1. Check Pause State (Block here if paused)
             try
             {

@@ -5,8 +5,9 @@ namespace SharpSFV.Models
     public enum JobStatus
     {
         Queued,
+        Scanning,
         InProgress,
-        Paused, // Added for Pause functionality
+        Paused,
         Done,
         Error
     }

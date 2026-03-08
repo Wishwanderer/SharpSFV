@@ -132,6 +132,9 @@ namespace SharpSFV
         // Active Jobs Controls (The bottom panel showing currently hashing files)
         private ListView? _lvActiveJobs;
 
+        // Secondary Progress Bar for Mini Mode (File-level progress)
+        private ProgressBar? _progressBarFile;
+
         // Filter Controls
         private TextBox? _txtFilter;
         private ComboBox? _cmbStatusFilter;
@@ -189,6 +192,8 @@ namespace SharpSFV
                 this.ShowInTaskbar = false;
                 this.WindowState = FormWindowState.Normal;
 
+                // The instance holding the Mutex (Server) must also process the file 
+                // that initiated it.
                 foreach (var arg in args)
                 {
                     if (!string.IsNullOrWhiteSpace(arg) && !arg.StartsWith("-"))
@@ -335,7 +340,7 @@ namespace SharpSFV
             {
                 sfd.Title = "SharpSFV - Create Checksum";
                 sfd.InitialDirectory = baseDir;
-                sfd.FileName = "checksum";
+                sfd.FileName = "checksums";
                 sfd.Filter = "SFV File (*.sfv)|*.sfv|MD5 File (*.md5)|*.md5|SHA1 File (*.sha1)|*.sha1|SHA256 File (*.sha256)|*.sha256|xxHash3 (*.xxh3)|*.xxh3";
 
                 sfd.FilterIndex = _settings.DefaultAlgo switch
@@ -529,6 +534,12 @@ namespace SharpSFV
                         }
                         catch { }
                     }
+                }
+
+                // Max out file progress bar when completely done
+                if (_isCreateMode && _progressBarFile != null)
+                {
+                    _progressBarFile.Value = 100;
                 }
 
                 // Update Window Title

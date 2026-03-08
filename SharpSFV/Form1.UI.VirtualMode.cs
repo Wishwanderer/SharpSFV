@@ -49,6 +49,8 @@ namespace SharpSFV
                     JobStatus status = _jobStore.Statuses[idx];
                     if (status == JobStatus.InProgress)
                         item.SubItems.Add($"{_jobStore.Progress[idx]:F1}%");
+                    else if (status == JobStatus.Scanning)
+                        item.SubItems.Add("Counting files...");
                     else if (status == JobStatus.Paused)
                         item.SubItems.Add($"{_jobStore.Progress[idx]:F1}% (Paused)");
                     else if (status == JobStatus.Queued)
@@ -60,6 +62,7 @@ namespace SharpSFV
                     string statusStr = status switch
                     {
                         JobStatus.Done => "DONE",
+                        JobStatus.Scanning => "SCANNING",
                         JobStatus.InProgress => "IN PROGRESS",
                         JobStatus.Paused => "PAUSED",
                         JobStatus.Error => "ERROR",
@@ -80,6 +83,10 @@ namespace SharpSFV
                         case JobStatus.Error:
                             item.ForeColor = ColRedText;
                             item.BackColor = ColRedBack;
+                            break;
+                        case JobStatus.Scanning:
+                            item.ForeColor = Color.DarkOrange;
+                            item.BackColor = Color.OldLace;
                             break;
                         case JobStatus.InProgress:
                             item.BackColor = Color.AliceBlue;
